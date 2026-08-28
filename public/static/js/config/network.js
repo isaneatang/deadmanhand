@@ -13,20 +13,17 @@
 //     https://scan.botchain.ai/api/v2/tokens?q=USDT (bridged USDT, 291k+
 //     holders, exchange_rate "1" — the canonical bridged USDT for BOT Chain
 //     mainnet).
-//   - testnet usdtAddress: UNVERIFIED. Blockscout's testnet instance
-//     (scan.bohr.life) lists at least a dozen different tokens named/symbol
-//     "USDT" (test deployments from many different builders — see
-//     scan.bohr.life/tokens), with no single canonical "the" testnet USDT.
-//     Per the Master Build Prompt (Section 3.3) and Addendum v2 (Section 3),
-//     this must not be guessed. It is left null; the UI must hide the USDT
-//     balance row and disable fee-based actions on testnet with a visible
-//     "not available on testnet" notice until a real testnet USDT contract
-//     is confirmed and filled in here.
+//   - testnet usdtAddress: confirmed by the product owner and verified live
+//     via https://scan.bohr.life/api/v2/tokens/0x75edC9335175Fc0552D51D48439F229c10420fe3
+//     -> { name: "Tether USD", symbol: "USDT", decimals: "6", holders: "1002" }.
+//     (Blockscout's testnet instance lists several other tokens also named
+//     "USDT" from unrelated test deployments — this specific address is the
+//     one confirmed correct for this project, not a guess.)
 //
-// dmhContractAddress is intentionally null on both networks: DeadMansHand.sol
-// has not been deployed anywhere yet (this is a from-scratch build). Fill
-// these in immediately after running the deployment script
-// (scripts/deploy.cjs) — see README "Deployment" section.
+// dmhContractAddress is intentionally null on both networks until
+// DeadMansHand.sol is actually deployed. Fill these in immediately after
+// running the deployment script (scripts/deploy.cjs) — see README
+// "Deployment" section.
 
 const NETWORKS = {
   testnet: {
@@ -37,10 +34,10 @@ const NETWORKS = {
     explorerUrl: 'https://scan.bohr.life',
     explorerApiBase: 'https://scan.bohr.life/api/v2',
     nativeCurrency: { name: 'BOT', symbol: 'BOT', decimals: 18 },
-    usdtAddress: null, // UNVERIFIED — see note above. Do not fabricate.
+    usdtAddress: '0x75edC9335175Fc0552D51D48439F229c10420fe3', // confirmed testnet Tether USD
     usdtDecimals: 6,
     faucetUrl: 'https://faucet.botchain.ai/basic',
-    dmhContractAddress: null, // UNVERIFIED — fill in after deployment
+    dmhContractAddress: null, // fill in after deployment
   },
   mainnet: {
     chainId: 677,
@@ -53,7 +50,7 @@ const NETWORKS = {
     usdtAddress: '0xaBabc7Ddc03e501d190C676BF3d92ef0e6e87a3C', // confirmed bridged USDT
     usdtDecimals: 6,
     faucetUrl: null,
-    dmhContractAddress: null, // UNVERIFIED — fill in after deployment
+    dmhContractAddress: null, // fill in after deployment
   },
 };
 
