@@ -22,7 +22,7 @@ function computeSecretHash(secretPlaintext, ownerAddress, vaultId) {
 }
 
 async function deployFixture() {
-  const [deployer, owner, claimant, other] = await ethers.getSigners();
+  const [deployer, owner, claimant, other, feeRecipient] = await ethers.getSigners();
 
   const MockERC20 = await ethers.getContractFactory('MockERC20');
   const usdt = await MockERC20.deploy('Tether USD', 'USDT', 6);
@@ -34,7 +34,8 @@ async function deployFixture() {
     BASE_FEE,
     FAILURE_THRESHOLD,
     COOLDOWN_DURATION,
-    MAX_ESCALATION_DOUBLINGS
+    MAX_ESCALATION_DOUBLINGS,
+    feeRecipient.address
   );
   await dmh.waitForDeployment();
 
@@ -46,7 +47,7 @@ async function deployFixture() {
   await usdt.mint(other.address, ethers.parseUnits('1000000', 6));
   await usdt.connect(other).approve(await dmh.getAddress(), ethers.MaxUint256);
 
-  return { deployer, owner, claimant, other, usdt, dmh };
+  return { deployer, owner, claimant, other, feeRecipient, usdt, dmh };
 }
 
 describe('DeadMansHand', function () {
@@ -87,6 +88,34 @@ describe('DeadMansHand', function () {
       await expect(
         dmh.connect(owner).createVault(vaultId, secretHash, 100 * 365 * 24 * 60 * 60)
       ).to.be.revertedWithCustomError(dmh, 'InvalidInactivityPeriod');
+    });
+
+    it('allows the vault creator to pick any custom inactivity duration, including very short ones (1 minute minimum, not months)', async function () {
+      const { owner, claimant, dmh } = await deployFixture();
+      const vaultId = computeVaultId('short-duration');
+      const secret = 'quick-test-secret-XYZ789';
+      const secretHash = computeSecretHash(secret, owner.address, vaultId);
+
+      // 30 seconds is below the 1-minute floor — must be rejected.
+      await expect(
+        dmh.connect(owner).createVault(vaultId, secretHash, 30)
+      ).to.be.revertedWithCustomError(dmh, 'InvalidInactivityPeriod');
+
+      // Exactly 1 minute is the floor — must be accepted, and the vault
+      // must actually become claimable after just 1 minute of inactivity
+      // (proving this isn't secretly clamped to a longer minimum anywhere
+      // else in the contract).
+      await dmh.connect(owner).createVault(vaultId, secretHash, 60);
+      let status = await dmh.getStatus(vaultId);
+      expect(status.expired).to.equal(false);
+
+      await time.increase(61);
+      status = await dmh.getStatus(vaultId);
+      expect(status.expired).to.equal(true);
+
+      await expect(dmh.connect(claimant).attemptUnlock(vaultId, secret))
+        .to.emit(dmh, 'UnlockAttempted')
+        .withArgs(vaultId, claimant.address, true);
     });
   });
 
@@ -204,6 +233,29 @@ describe('DeadMansHand', function () {
       const balAfter = await usdt.balanceOf(claimant.address);
 
       expect(balBefore - balAfter).to.equal(BASE_FEE);
+    });
+
+    it('forwards the fee directly to feeRecipient — never held by the contract itself', async function () {
+      const { owner, claimant, feeRecipient, dmh, usdt } = await deployFixture();
+      const secret = 'entropy-secret-abcdEFGH123';
+      const vaultId = computeVaultId('fee-recipient');
+      const secretHash = computeSecretHash(secret, owner.address, vaultId);
+      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
+      await time.increase(INACTIVITY_PERIOD + 1);
+
+      const recipientBalBefore = await usdt.balanceOf(feeRecipient.address);
+      const contractBalBefore = await usdt.balanceOf(await dmh.getAddress());
+
+      await expect(dmh.connect(claimant).attemptUnlock(vaultId, 'wrong-guess'))
+        .to.emit(usdt, 'Transfer')
+        .withArgs(claimant.address, feeRecipient.address, BASE_FEE);
+
+      const recipientBalAfter = await usdt.balanceOf(feeRecipient.address);
+      const contractBalAfter = await usdt.balanceOf(await dmh.getAddress());
+
+      expect(recipientBalAfter - recipientBalBefore).to.equal(BASE_FEE);
+      expect(contractBalAfter).to.equal(contractBalBefore); // contract never holds the fee, even transiently in storage
+      expect(await dmh.feeRecipient()).to.equal(feeRecipient.address);
     });
 
     it('reverts FeeTransferFailed if claimant has insufficient allowance', async function () {

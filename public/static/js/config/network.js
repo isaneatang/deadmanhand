@@ -37,7 +37,12 @@ const NETWORKS = {
     usdtAddress: '0x75edC9335175Fc0552D51D48439F229c10420fe3', // confirmed testnet Tether USD
     usdtDecimals: 6,
     faucetUrl: 'https://faucet.botchain.ai/basic',
-    dmhContractAddress: null, // fill in after deployment
+    // Deployed 2026-08-28. Constructor args: feeToken=usdtAddress above,
+    // baseFee=1_000000 (1 USDT), failureThreshold=5, cooldownDuration=86400
+    // (24h), maxEscalationDoublings=4, feeRecipient confirmed by product
+    // owner (verified on-chain to match: dmh.feeRecipient() ==
+    // 0xCC5d74709117c08B803a32C51E108262ed66B4BD).
+    dmhContractAddress: '0x6bAc4F39e81955FD1Be3C890bd158aF0D08701af',
   },
   mainnet: {
     chainId: 677,

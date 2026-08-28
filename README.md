@@ -7,42 +7,33 @@ all that's granted). If the owner goes inactive past a chosen period, anyone
 who knows the secret can claim the registered assets, paying a flat fee that
 escalates (temporarily) on repeated wrong guesses.
 
-## ⚠️ Current Status: Built, NOT Deployed, NOT Fully Verified
+## ⚠️ Current Status: Contract Deployed to Testnet, Frontend NOT Yet Deployed
 
 This is an honest status report, not a "done" claim. See the checklist below.
 
 | Area | Status |
 |---|---|
-| Smart contract (`contracts/DeadMansHand.sol`) | ✅ Written, 23/23 Hardhat tests passing |
+| Smart contract (`contracts/DeadMansHand.sol`) | ✅ Written, 25/25 Hardhat tests passing |
+| Contract deployed to testnet | ✅ **Deployed** — `0x6bAc4F39e81955FD1Be3C890bd158aF0D08701af` on BOT Chain Testnet (chainId 968), verified on-chain |
+| Contract deployed to mainnet | ❌ **Not deployed** — not requested yet |
 | Frontend (Hono/Vite SPA, all flows) | ✅ Written, builds clean, runs in sandbox dev preview, zero console errors on **desktop** Playwright check |
-| Contract deployed to any network | ❌ **Not deployed** — blocked, see "Open Decisions" below |
 | Cloudflare Pages production deploy | ❌ **Not deployed** — needs your decision on deploy path (see below) |
 | Real mobile-wallet in-app-browser test (MetaMask mobile, spec-mandated minimum bar) | ❌ **Not done** — only desktop browser has been checked |
 | Git commit of this session's work | ✅ Done as of this commit |
 
 ### Open decisions blocking full completion
 
-1. **Testnet fee-token address.** The spec requires a flat fee denominated in
-   a stablecoin (referred to as "USDT" throughout the spec). I could not find
-   a canonical, unambiguous USDT-equivalent token deployed on the BOT Chain
-   **testnet** (`rpc.bohr.life`, chainId 968) — several differently-named
-   candidates exist and picking one would be fabricating a value the spec
-   explicitly forbids guessing at. **Mainnet** USDT is confirmed
-   (`0xaBabc7Ddc03e501d190C676BF3d92ef0e6e87a3C` on chainId 677,
-   `rpc.botchain.ai`). To deploy to testnet I need you to either (a) tell me
-   the correct testnet fee-token address, or (b) approve deploying a
-   `MockERC20` as a stand-in fee token for testnet demo/testing purposes only.
-2. **Cloudflare deployment path.** Two deploy options are available for this
+1. **Cloudflare deployment path.** Two deploy options are available for this
    sandbox: deploying to *your own* Cloudflare account (BYOK, full wrangler
    control) or a Genspark-managed hosted deploy (no token needed from you).
    I have not deployed the web app anywhere yet — tell me which you want.
-3. **Real mobile wallet test.** The spec explicitly requires testing inside a
+2. **Real mobile wallet test.** The spec explicitly requires testing inside a
    real mobile wallet's in-app browser (MetaMask mobile at minimum) before
    this can be considered spec-complete. That can only happen once the app
-   and contract are actually deployed to a reachable URL/network — it can't
-   be done meaningfully against the sandbox-only dev preview.
+   is actually deployed to a reachable URL — it can't be done meaningfully
+   against the sandbox-only dev preview.
 
-Once you answer #1 and #2, I can finish deployment and then do #3.
+Once you answer #1, I can finish deployment and then do #2.
 
 ---
 
@@ -76,8 +67,16 @@ struct Vault {
 }
 ```
 
+- The vault creator chooses **any** inactivity duration between 1 minute and
+  10 years (`MIN_INACTIVITY_PERIOD` / `MAX_INACTIVITY_PERIOD` in the
+  contract) — there is no forced multi-month floor. The UI's Step 2 lets you
+  type a number + pick a unit (minutes/hours/days/weeks/months/years), with
+  quick-fill presets as convenience shortcuts only.
 - Each vault has a list of registered token entries (ERC-20 or ERC-721
   collection address + a flag). Max 50 per vault.
+- Every collected unlock-attempt fee is forwarded **directly** to a fixed
+  `feeRecipient` address set at deploy time — the contract never holds fees
+  itself, so there is nothing to withdraw and nothing that can get stuck.
 - Secret hash is salted by **both** owner address and vaultId
   (`keccak256(abi.encodePacked(secretPlaintext, ownerAddress, vaultId))`) so
   the same plaintext secret never produces the same hash across vaults —
@@ -150,8 +149,10 @@ Single-file network switch: `public/static/js/config/network.js`.
 | Chain ID | 968 | 677 |
 | RPC | `https://rpc.bohr.life` | `https://rpc.botchain.ai` |
 | Explorer (Blockscout) | `https://scan.bohr.life` | `https://scan.botchain.ai` |
-| USDT / fee token | ❌ unresolved (see Open Decisions) | ✅ `0xaBabc7Ddc03e501d190C676BF3d92ef0e6e87a3C` |
-| DMH contract address | ❌ not deployed | ❌ not deployed |
+| USDT / fee token | ✅ `0x75edC9335175Fc0552D51D48439F229c10420fe3` | ✅ `0xaBabc7Ddc03e501d190C676BF3d92ef0e6e87a3C` |
+| DMH contract address | ✅ `0x6bAc4F39e81955FD1Be3C890bd158aF0D08701af` | ❌ not deployed |
+| Fee recipient | `0xCC5d74709117c08B803a32C51E108262ed66B4BD` | (same, once deployed) |
+| Deploy params | baseFee=1 USDT, failureThreshold=5, cooldown=24h, maxEscalationDoublings=4 | (not yet set) |
 
 ## Development
 
@@ -164,29 +165,31 @@ pm2 start ecosystem.config.cjs   # runs `wrangler pages dev dist --port 3000`
 Contract tests:
 
 ```bash
-npx hardhat test    # 23 passing
+npx hardhat test    # 25 passing
 ```
 
-Contract deploy (requires env vars — will throw if `FEE_TOKEN_ADDRESS` is
-missing, by design):
+Contract deploy (requires env vars — will throw if `FEE_TOKEN_ADDRESS` or
+`FEE_RECIPIENT_ADDRESS` is missing, by design):
 
 ```bash
-DEPLOYER_PRIVATE_KEY=0x... FEE_TOKEN_ADDRESS=0x... npx hardhat run scripts/deploy.cjs --network botTestnet
+DEPLOYER_PRIVATE_KEY=0x... FEE_TOKEN_ADDRESS=0x... FEE_RECIPIENT_ADDRESS=0x... npx hardhat run scripts/deploy.cjs --network botTestnet
 ```
+
+Testnet has already been deployed this way — see the Networks table above
+for the live address. To redeploy (e.g. after a contract change), rerun the
+command above and paste the new address into `network.js`.
 
 ## Not yet implemented / not yet done
 
-- Contract not deployed anywhere (see Open Decisions #1).
-- Cloudflare Pages production deploy not done (see Open Decisions #2).
+- Contract not deployed to mainnet (only testnet so far).
+- Cloudflare Pages production deploy not done (see Open Decisions #1).
 - Real mobile-wallet in-app-browser manual test pass not done (see Open
-  Decisions #3) — this is a spec-mandated bar, not optional polish.
-- `dmhContractAddress` in `network.js` will need to be filled in for
-  whichever network(s) get deployed.
+  Decisions #2) — this is a spec-mandated bar, not optional polish.
 
 ## Recommended next steps
 
-1. Answer the two open decisions above (testnet fee token; deploy path).
-2. Deploy the contract to testnet (and mainnet once you're satisfied).
-3. Deploy the frontend to Cloudflare Pages.
-4. Test the whole flow inside MetaMask mobile's in-app browser on a real
+1. Answer the Cloudflare deploy-path decision above.
+2. Deploy the frontend to Cloudflare Pages.
+3. Test the whole flow inside MetaMask mobile's in-app browser on a real
    phone, on testnet, before considering this production-ready.
+4. Deploy to mainnet once testnet is fully verified end-to-end.

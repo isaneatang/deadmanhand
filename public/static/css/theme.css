@@ -433,6 +433,29 @@ a:hover, a:focus {
   background: rgba(34, 197, 94, 0.1);
   box-shadow: 0 0 10px rgba(34, 197, 94, 0.2);
 }
+.dmh-chip-small {
+  padding: 6px 12px;
+  min-height: 32px;
+  font-size: 12px;
+}
+
+/* ---------------------------------------------------------------------
+   Inline field row (e.g. number input + unit chip group side by side)
+--------------------------------------------------------------------- */
+.dmh-inline-row {
+  display: flex;
+  gap: var(--dmh-space-2);
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.dmh-inline-row .dmh-input {
+  width: 90px;
+  flex: 0 0 90px;
+}
+.dmh-inline-row .dmh-chip-row {
+  flex: 1;
+  min-width: 200px;
+}
 
 /* ---------------------------------------------------------------------
    Bottom sheet / custom dropdown trigger

@@ -19,10 +19,20 @@ async function main() {
     );
   }
 
+  const feeRecipient = process.env.FEE_RECIPIENT_ADDRESS;
+  if (!feeRecipient) {
+    throw new Error(
+      'FEE_RECIPIENT_ADDRESS env var is required (the address that will receive every collected unlock fee). ' +
+      'Do not fabricate this — it must be an address the product owner explicitly confirmed.'
+    );
+  }
+
   const baseFee = process.env.BASE_FEE || '1000000'; // 1 USDT @ 6 decimals
   const failureThreshold = process.env.FAILURE_THRESHOLD || '5';
   const cooldownDuration = process.env.COOLDOWN_DURATION || String(24 * 60 * 60);
   const maxEscalationDoublings = process.env.MAX_ESCALATION_DOUBLINGS || '4';
+
+  console.log('Fee recipient:', feeRecipient);
 
   const DeadMansHand = await hre.ethers.getContractFactory('DeadMansHand');
   const dmh = await DeadMansHand.deploy(
@@ -30,7 +40,8 @@ async function main() {
     baseFee,
     failureThreshold,
     cooldownDuration,
-    maxEscalationDoublings
+    maxEscalationDoublings,
+    feeRecipient
   );
   await dmh.waitForDeployment();
   const address = await dmh.getAddress();

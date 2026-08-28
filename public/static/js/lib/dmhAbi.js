@@ -25,6 +25,11 @@ export const DMH_ABI = [
         "internalType": "uint16",
         "name": "_maxEscalationDoublings",
         "type": "uint16"
+      },
+      {
+        "internalType": "address",
+        "name": "_feeRecipient",
+        "type": "address"
       }
     ],
     "stateMutability": "nonpayable",
@@ -496,6 +501,19 @@ export const DMH_ABI = [
         "internalType": "uint16",
         "name": "",
         "type": "uint16"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "feeRecipient",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
       }
     ],
     "stateMutability": "view",

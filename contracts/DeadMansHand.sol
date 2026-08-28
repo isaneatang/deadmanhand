@@ -52,7 +52,13 @@ contract DeadMansHand is ReentrancyGuard {
     // ---------------------------------------------------------------------
     // Constants
     // ---------------------------------------------------------------------
-    uint256 public constant MIN_INACTIVITY_PERIOD = 1 days;
+    // Kept deliberately low (1 minute) rather than a multi-month floor:
+    // the product owner wants vault creators fully free to choose their own
+    // inactivity window, including very short windows for fast-turnaround
+    // testing/demo of the recovery flow. The UI still nudges toward sane
+    // real-world durations, but the contract itself must not force a floor
+    // higher than genuinely necessary for basic sanity.
+    uint256 public constant MIN_INACTIVITY_PERIOD = 1 minutes;
     uint256 public constant MAX_INACTIVITY_PERIOD = 10 * 365 days;
     uint256 public constant MAX_TOKENS_PER_VAULT = 50;
     uint256 public constant MAX_SECRET_LENGTH = 256;
@@ -80,6 +86,12 @@ contract DeadMansHand is ReentrancyGuard {
     ///         the fee never grows unboundedly even if failureThreshold is
     ///         configured very high.
     uint16 public immutable maxEscalationDoublings;
+
+    /// @notice Address that receives every collected unlock-attempt fee.
+    ///         Fees are forwarded here directly at collection time (not
+    ///         held in this contract), so there is no separate withdraw
+    ///         step and no fee ever gets stuck. Set once at deploy time.
+    address public immutable feeRecipient;
 
     // ---------------------------------------------------------------------
     // Storage
@@ -130,9 +142,11 @@ contract DeadMansHand is ReentrancyGuard {
         uint256 _baseFee,
         uint16 _failureThreshold,
         uint256 _cooldownDuration,
-        uint16 _maxEscalationDoublings
+        uint16 _maxEscalationDoublings,
+        address _feeRecipient
     ) {
         if (_feeToken == address(0)) revert ZeroAddress();
+        if (_feeRecipient == address(0)) revert ZeroAddress();
         require(_baseFee > 0, "baseFee=0");
         require(_failureThreshold > 0, "failureThreshold=0");
         require(_cooldownDuration > 0, "cooldownDuration=0");
@@ -142,6 +156,7 @@ contract DeadMansHand is ReentrancyGuard {
         failureThreshold = _failureThreshold;
         cooldownDuration = _cooldownDuration;
         maxEscalationDoublings = _maxEscalationDoublings;
+        feeRecipient = _feeRecipient;
     }
 
     // ---------------------------------------------------------------------
@@ -279,8 +294,10 @@ contract DeadMansHand is ReentrancyGuard {
         }
 
         // --- Fee collection (charged either way) ---
+        // Sent directly to feeRecipient, never held by this contract, so
+        // there is nothing to withdraw and nothing that can get stuck.
         uint256 fee = _currentFee(v.failedAttempts);
-        bool feeOk = IERC20(feeToken).transferFrom(msg.sender, address(this), fee);
+        bool feeOk = IERC20(feeToken).transferFrom(msg.sender, feeRecipient, fee);
         if (!feeOk) revert FeeTransferFailed();
         emit FeeCollected(vaultId, msg.sender, fee);
 
