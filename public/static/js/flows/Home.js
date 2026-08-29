@@ -10,7 +10,8 @@ export function renderHome(container) {
     el('div', { class: 'dmh-main' }, [
       el('section', { class: 'dmh-hero' }, [
         el('div', { class: 'dmh-eyebrow mono' }, [el('span', { class: 'dmh-live-dot' }), 'NON-CUSTODIAL RECOVERY PROTOCOL']),
-        el('h1', { class: 'dmh-heading dmh-hero-title' }, ["A dead man's switch ", el('span', {}, 'for digital assets.')]),
+        el('h1', { class: 'dmh-heading dmh-hero-title mono' }, 'DMH'),
+        el('p', { class: 'dmh-hero-tagline' }, 'A dead man’s switch for digital assets.'),
         el('p', { class: 'dmh-subheading dmh-hero-copy' }, 'Create a recovery path without transferring custody. Your assets remain in your wallet until the inactivity rule is met and the correct secret is submitted.'),
         el('div', { class: 'dmh-trust-row' }, [
           el('span', {}, 'No deposits'),

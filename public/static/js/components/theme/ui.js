@@ -77,7 +77,7 @@ export function renderTopBar(onNetworkChanged) {
   );
 
   return el('header', { class: 'dmh-topbar' }, [
-    el('div', { class: 'dmh-topbar-title' }, [el('span', { class: 'dot' }), "Dead Man's Hand"]),
+    el('div', { class: 'dmh-topbar-title mono' }, [el('span', { class: 'dot' }), 'DMH']),
     badge,
   ]);
 }
