@@ -10,7 +10,13 @@ import { navigate } from '../../app.js';
 const SECOND = 1000;
 
 export async function renderDashboard(container, vaultId) {
-  container.appendChild(renderBackBar(() => navigate(''), 'Vault dashboard'));
+  container.appendChild(renderBackBar(() => {
+    if (document.body.dataset.dmhTransactionLock === 'true') {
+      showToast('Finish or reject the current wallet transaction before leaving the dashboard.', 'info');
+      return;
+    }
+    navigate('profile');
+  }, 'Vault dashboard'));
 
   const wrapper = el('div', { class: 'dmh-main' });
   container.appendChild(wrapper);
@@ -230,7 +236,7 @@ function renderOwnerControls(card, vaultId, initialVault, refreshVault) {
 
   const controls = el('div', { class: 'dmh-field', 'aria-label': 'Owner actions' });
   const actionStatus = el('div', { class: 'dmh-hint', role: 'status', 'aria-live': 'polite' });
-  const pingBtn = el('button', { class: 'dmh-btn dmh-btn-primary', type: 'button' }, "Check in now (I'm still here)");
+  const pingBtn = el('button', { class: 'dmh-btn dmh-btn-primary', type: 'button' }, 'Reset inactivity timer');
   const addAssetBtn = el('button', { class: 'dmh-btn dmh-btn-secondary', type: 'button' }, '+ Add another asset');
   const deactivateBtn = el('button', { class: 'dmh-btn dmh-btn-danger', type: 'button' }, 'Deactivate vault');
 
@@ -250,17 +256,28 @@ function renderOwnerControls(card, vaultId, initialVault, refreshVault) {
     }
   }
 
+  async function verifyOwnerWallet() {
+    const address = await connectWallet();
+    await ensureCorrectNetwork();
+    if (address.toLowerCase() !== initialVault.owner.toLowerCase()) {
+      throw new Error('The connected wallet is not this vault owner.');
+    }
+  }
+
   pingBtn.addEventListener('click', async () => {
     pingBtn.disabled = true;
-    pingBtn.textContent = 'Confirm check-in in wallet...';
+    pingBtn.textContent = 'Confirm timer reset in wallet...';
+    document.body.dataset.dmhTransactionLock = 'true';
     try {
+      await verifyOwnerWallet();
       await pingVault(vaultId);
       await refreshVault();
-      showToast('Checked in. The countdown has reset.', 'success');
+      showToast('Inactivity timer reset.', 'success');
     } catch (e) {
       showToast(e.shortMessage || e.message, 'error');
     } finally {
-      pingBtn.textContent = "Check in now (I'm still here)";
+      delete document.body.dataset.dmhTransactionLock;
+      pingBtn.textContent = 'Reset inactivity timer';
       syncDisabledState();
     }
   });
@@ -306,7 +323,9 @@ function renderOwnerControls(card, vaultId, initialVault, refreshVault) {
       cancelBtn.disabled = true;
       confirmBtn.disabled = true;
       confirmBtn.textContent = 'Confirm in wallet...';
+      document.body.dataset.dmhTransactionLock = 'true';
       try {
+        await verifyOwnerWallet();
         await deactivateVault(vaultId);
         await refreshVault();
         showToast('Vault deactivated.', 'success');
@@ -315,6 +334,8 @@ function renderOwnerControls(card, vaultId, initialVault, refreshVault) {
         cancelBtn.disabled = false;
         confirmBtn.disabled = false;
         confirmBtn.textContent = 'Permanently deactivate';
+      } finally {
+        delete document.body.dataset.dmhTransactionLock;
       }
     });
     confirmBtn.focus();
@@ -395,7 +416,15 @@ function renderAddAssetForm(vaultId, registeredTokens, onAdded, onCancel) {
 
     submitBtn.disabled = true;
     cancelBtn.disabled = true;
+    document.body.dataset.dmhTransactionLock = 'true';
     try {
+      const owner = await connectWallet();
+      await ensureCorrectNetwork();
+      const rawVault = await getDmhReadContract().vaults(vaultId);
+      const vaultOwner = rawVault.owner ?? rawVault[0];
+      if (owner.toLowerCase() !== vaultOwner.toLowerCase()) {
+        throw new Error('The connected wallet is not this vault owner.');
+      }
       if (!approvalComplete) {
         submitBtn.textContent = 'Confirm approval in wallet...';
         if (isErc721) {
@@ -418,6 +447,8 @@ function renderAddAssetForm(vaultId, registeredTokens, onAdded, onCancel) {
       submitBtn.disabled = false;
       cancelBtn.disabled = false;
       submitBtn.textContent = approvalComplete ? 'Retry registration' : 'Approve and register';
+    } finally {
+      delete document.body.dataset.dmhTransactionLock;
     }
   });
   return form;

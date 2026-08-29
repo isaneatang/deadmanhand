@@ -82,6 +82,33 @@ export function renderTopBar(onNetworkChanged) {
   ]);
 }
 
+export function renderBottomNav(activePath, navigate) {
+  const items = [
+    { path: '', label: 'Home', icon: 'H' },
+    { path: 'setup', label: 'Create', icon: '+' },
+    { path: 'claim', label: 'Claim', icon: 'C' },
+    { path: 'profile', label: 'Profile', icon: 'P' },
+  ];
+  return el('nav', { class: 'dmh-bottom-nav', 'aria-label': 'Primary navigation' }, items.map((item) => {
+    const active = activePath === item.path || (activePath === 'dashboard' && item.path === 'profile');
+    return el('button', {
+      class: `dmh-bottom-nav-item${active ? ' active' : ''}`,
+      type: 'button',
+      'aria-current': active ? 'page' : null,
+      onClick: () => {
+        if (document.body.dataset.dmhTransactionLock === 'true') {
+          showToast('Finish or reject the current wallet transaction before navigating.', 'info');
+          return;
+        }
+        navigate(item.path);
+      },
+    }, [
+      el('span', { class: 'dmh-bottom-nav-icon', 'aria-hidden': 'true' }, item.icon),
+      el('span', {}, item.label),
+    ]);
+  }));
+}
+
 /**
  * Mainnet safety confirmation — required per Security Section 7 before any
  * live-network transaction/network switch to mainnet.

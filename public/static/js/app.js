@@ -11,7 +11,8 @@ import { renderHome } from './flows/Home.js';
 import { renderOwnerSetup } from './flows/OwnerSetup/index.js';
 import { renderClaimantFlow } from './flows/ClaimantFlow/index.js';
 import { renderDashboard } from './flows/Dashboard/index.js';
-import { renderTopBar } from './components/theme/ui.js';
+import { renderProfile } from './flows/Profile.js';
+import { renderBottomNav, renderTopBar } from './components/theme/ui.js';
 
 const root = document.getElementById('app-root');
 
@@ -33,6 +34,7 @@ function renderApp() {
     setup: "Set Up a Vault | Dead Man's Hand",
     claim: "Claim a Vault | Dead Man's Hand",
     dashboard: "Vault Dashboard | Dead Man's Hand",
+    profile: "Profile | Dead Man's Hand",
   };
   document.title = routeTitles[path] || routeTitles[''];
 
@@ -55,9 +57,14 @@ function renderApp() {
     case 'dashboard':
       renderDashboard(content, params[0]);
       break;
+    case 'profile':
+      renderProfile(content);
+      break;
     default:
       renderHome(content);
   }
+
+  root.appendChild(renderBottomNav(path, navigate));
 
   requestAnimationFrame(() => {
     const heading = content.querySelector('h1');

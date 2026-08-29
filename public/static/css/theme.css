@@ -227,7 +227,7 @@ a:hover, a:focus {
   max-width: 680px;
   margin: 0 auto;
   padding: clamp(20px, 5vw, 40px) var(--dmh-space-4);
-  padding-bottom: calc(96px + var(--dmh-safe-bottom));
+  padding-bottom: calc(180px + var(--dmh-safe-bottom));
   display: flex;
   flex-direction: column;
   gap: var(--dmh-space-4);
@@ -336,7 +336,7 @@ a:hover, a:focus {
   position: fixed;
   left: 0;
   right: 0;
-  bottom: 0;
+  bottom: calc(70px + var(--dmh-safe-bottom));
   z-index: 50;
   max-width: 680px;
   margin: 0 auto;
@@ -757,9 +757,14 @@ a:hover, a:focus {
   border: 1px solid var(--dmh-border);
   border-radius: var(--dmh-radius-md);
   padding: 10px 12px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 .dmh-copy-row .value {
   flex: 1;
+  min-width: 0;
+  max-width: 100%;
   font-family: var(--dmh-font-mono);
   font-size: 13px;
   color: var(--dmh-text-primary);
@@ -809,7 +814,7 @@ dl.dmh-card {
 }
 dl.dmh-card > div {
   display: grid;
-  grid-template-columns: minmax(120px, 0.45fr) 1fr;
+  grid-template-columns: minmax(120px, 0.45fr) minmax(0, 1fr);
   gap: 16px;
   align-items: start;
   padding: 12px 0;
@@ -818,6 +823,70 @@ dl.dmh-card > div {
 dl.dmh-card > div:last-child { border-bottom: 0; }
 dl.dmh-card dt, dl.dmh-card dd { margin: 0; }
 dl.dmh-card dd { overflow-wrap: anywhere; }
+dl.dmh-card dd { min-width: 0; max-width: 100%; }
+
+/* Mobile-first persistent navigation. */
+.dmh-bottom-nav {
+  position: fixed;
+  left: 50%;
+  bottom: 0;
+  z-index: 80;
+  width: min(100%, 680px);
+  min-height: calc(64px + var(--dmh-safe-bottom));
+  transform: translateX(-50%);
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  padding: 6px 8px calc(6px + var(--dmh-safe-bottom));
+  background: rgba(1, 2, 2, 0.97);
+  border: 1px solid var(--dmh-border);
+  border-bottom: 0;
+  border-radius: 14px 14px 0 0;
+  backdrop-filter: blur(12px);
+}
+.dmh-bottom-nav-item {
+  min-width: 0;
+  min-height: 52px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dmh-text-muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  font: 600 10px var(--dmh-font-sans);
+  cursor: pointer;
+}
+.dmh-bottom-nav-item.active {
+  color: var(--dmh-green-phosphor);
+  background: rgba(34, 197, 94, 0.08);
+}
+.dmh-bottom-nav-icon {
+  font: 700 19px/1 var(--dmh-font-mono);
+}
+
+/* Owner profile and vault shortcuts. */
+.dmh-profile-vaults { display: flex; flex-direction: column; gap: 12px; }
+.dmh-profile-address {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dmh-green-bright);
+}
+.dmh-profile-summary { padding: 4px 2px 8px; }
+.dmh-profile-summary p { margin: 6px 0 0; }
+.dmh-profile-vault-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+.dmh-profile-vault-heading > div { min-width: 0; }
+.dmh-vault-id-preview { margin-top: 5px; color: var(--dmh-text-secondary); font-size: 12px; }
+.dmh-profile-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 
 /* Landing composition: editorial hierarchy with technical status details. */
 .dmh-hero {
@@ -934,6 +1003,16 @@ button.dmh-card:hover { border-color: var(--dmh-border-strong); background: var(
   .dmh-main {
     padding: var(--dmh-space-5);
   }
+  .dmh-bottom-nav {
+    bottom: 16px;
+    width: min(calc(100% - 32px), 520px);
+    min-height: 62px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--dmh-border);
+    border-radius: 14px;
+    box-shadow: 0 18px 50px rgba(0,0,0,0.48);
+  }
+  .dmh-sticky-cta { bottom: 86px; }
 }
 
 @media (max-width: 600px) {
@@ -946,6 +1025,8 @@ button.dmh-card:hover { border-color: var(--dmh-border-strong); background: var(
   dl.dmh-card > div { grid-template-columns: 1fr; gap: 6px; }
   .dmh-asset-row { align-items: flex-start; flex-wrap: wrap; }
   .dmh-asset-row .dmh-badge, .dmh-asset-row .dmh-toggle { margin-left: auto; }
+  .dmh-profile-actions { grid-template-columns: 1fr; }
+  .dmh-profile-vault-heading { flex-direction: column; }
 }
 
 @media (prefers-reduced-motion: reduce) {

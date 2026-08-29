@@ -91,9 +91,18 @@ export async function ensureCorrectNetwork() {
           },
         ],
       });
+      await window.ethereum.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: net.chainIdHex }],
+      });
     } else {
       throw switchError;
     }
+  }
+
+  const confirmedChainId = await window.ethereum.request({ method: 'eth_chainId' });
+  if (confirmedChainId?.toLowerCase() !== net.chainIdHex.toLowerCase()) {
+    throw new Error(`Switch your wallet to ${net.chainName} before continuing.`);
   }
 }
 
