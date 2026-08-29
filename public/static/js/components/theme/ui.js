@@ -17,7 +17,6 @@ export function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs)) {
     if (key === 'class') node.className = value;
-    else if (key === 'html') node.innerHTML = value; // only ever used with static, non-user-derived strings in this app
     else if (key.startsWith('on') && typeof value === 'function') node.addEventListener(key.slice(2).toLowerCase(), value);
     else if (value !== null && value !== undefined) node.setAttribute(key, value);
   }
@@ -40,10 +39,16 @@ export function clear(node) {
 export function renderTopBar(onNetworkChanged) {
   const netKey = getActiveNetworkKey();
   const badge = el(
-    'span',
+    'button',
     {
       class: `dmh-network-badge ${netKey}`,
+      type: 'button',
+      'aria-label': `Active network: ${getNetworkConfigFor(netKey).chainName}. Change network`,
       onClick: () => {
+        if (document.body.dataset.dmhTransactionLock === 'true') {
+          showToast('Finish or reject the current wallet transaction before changing networks.', 'info');
+          return;
+        }
         const options = getAllNetworkKeys().map((key) => ({
           value: key,
           label: getNetworkConfigFor(key).chainName,
@@ -83,24 +88,24 @@ export function renderTopBar(onNetworkChanged) {
  */
 export function showMainnetConfirmation(onConfirm) {
   const overlay = el('div', { class: 'dmh-sheet-overlay open' });
-  const sheet = el('div', { class: 'dmh-sheet open' }, [
+  const sheet = el('div', { class: 'dmh-sheet open', role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': 'dmh-mainnet-title' }, [
     el('div', { class: 'dmh-sheet-handle' }),
     el('div', { class: 'dmh-main', style: 'padding-bottom: 24px;' }, [
       el('div', { class: 'dmh-warning-banner danger' }, [
         el('div', {}, [
-          el('strong', {}, '⚠ You are about to interact with MAINNET.'),
+          el('strong', { id: 'dmh-mainnet-title' }, 'You are about to interact with MAINNET.'),
           el('p', { style: 'margin: 8px 0 0;' }, 'This uses real BOT Chain funds. Transactions cannot be undone. Only continue if you understand the risk.'),
         ]),
       ]),
       el('div', { style: 'display:flex; gap: 12px; margin-top: 16px;' }, [
         el('button', {
           class: 'dmh-btn dmh-btn-secondary',
-          onClick: () => document.body.removeChild(overlay),
+          onClick: close,
         }, 'Cancel'),
         el('button', {
           class: 'dmh-btn dmh-btn-danger',
           onClick: () => {
-            document.body.removeChild(overlay);
+            close();
             onConfirm();
           },
         }, 'I understand, continue'),
@@ -109,6 +114,32 @@ export function showMainnetConfirmation(onConfirm) {
   ]);
   overlay.appendChild(sheet);
   document.body.appendChild(overlay);
+  const cancelBtn = sheet.querySelector('button');
+  const onKeyDown = (event) => {
+    if (event.key === 'Escape') close();
+    if (event.key === 'Tab') keepFocusInside(event, sheet);
+  };
+  document.addEventListener('keydown', onKeyDown);
+  cancelBtn.focus();
+
+  function close() {
+    document.removeEventListener('keydown', onKeyDown);
+    overlay.remove();
+  }
+}
+
+function keepFocusInside(event, container) {
+  const focusable = Array.from(container.querySelectorAll('button:not([disabled]), a[href], input:not([disabled]), [tabindex]:not([tabindex="-1"])'));
+  if (focusable.length === 0) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -135,7 +166,7 @@ export function renderStepIndicator(current, total) {
     if (i === current) cls += ' active';
     dots.appendChild(el('span', { class: cls }));
   }
-  return el('div', { class: 'dmh-step-indicator' }, [`Step ${current} of ${total}`, dots]);
+  return el('div', { class: 'dmh-step-indicator', 'aria-label': `Step ${current} of ${total}` }, [`Step ${current} of ${total}`, dots]);
 }
 
 // ---------------------------------------------------------------------
@@ -151,7 +182,7 @@ export function renderStickyCta(buttonEl) {
 let toastContainer = null;
 function ensureToastContainer() {
   if (!toastContainer) {
-    toastContainer = el('div', { class: 'dmh-toast-container' });
+    toastContainer = el('div', { class: 'dmh-toast-container', 'aria-live': 'polite', 'aria-atomic': 'true' });
     document.body.appendChild(toastContainer);
   }
   return toastContainer;
@@ -159,7 +190,7 @@ function ensureToastContainer() {
 
 export function showToast(message, type = 'info', durationMs = 4500) {
   const container = ensureToastContainer();
-  const toast = el('div', { class: `dmh-toast ${type}` }, message);
+  const toast = el('div', { class: `dmh-toast ${type}`, role: type === 'error' ? 'alert' : 'status' }, message);
   container.appendChild(toast);
   setTimeout(() => {
     toast.style.transition = 'opacity 0.3s ease';
@@ -173,7 +204,7 @@ export function showToast(message, type = 'info', durationMs = 4500) {
 // secret field (Security Section 7).
 // ---------------------------------------------------------------------
 export function renderCopyableValue(value, label) {
-  const copyBtn = el('button', { class: 'dmh-copy-btn' }, 'Copy');
+  const copyBtn = el('button', { class: 'dmh-copy-btn', type: 'button', 'aria-label': `Copy ${label || 'value'}` }, 'Copy');
   copyBtn.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(value);
@@ -184,7 +215,7 @@ export function renderCopyableValue(value, label) {
       showToast('Copy failed — select and copy manually.', 'error');
     }
   });
-  return el('div', { class: 'dmh-copy-row' }, [el('span', { class: 'value' }, value), copyBtn]);
+  return el('div', { class: 'dmh-copy-row' }, [el('span', { class: 'value', title: value }, value), copyBtn]);
 }
 
 export function formatDuration(totalSeconds) {

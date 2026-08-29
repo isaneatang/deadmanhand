@@ -57,6 +57,7 @@ export function renderStep2Secret(container, state, onNext, onBack) {
   let showSecret = false;
 
   const countInput = el('input', {
+    id: 'owner-inactivity-count',
     class: 'dmh-input mono',
     type: 'number',
     inputmode: 'numeric',
@@ -73,9 +74,12 @@ export function renderStep2Secret(container, state, onNext, onBack) {
       recomputePeriod();
     },
   });
+  unitGroup.node.setAttribute('role', 'group');
+  unitGroup.node.setAttribute('aria-label', 'Inactivity period unit');
 
-  const periodError = el('div', { class: 'dmh-error-text' });
-  const periodHint = el('div', { class: 'dmh-hint' });
+  const periodError = el('div', { class: 'dmh-error-text', id: 'owner-period-error', role: 'alert', 'aria-live': 'assertive' });
+  const periodHint = el('div', { class: 'dmh-hint', id: 'owner-period-hint', role: 'status', 'aria-live': 'polite' });
+  countInput.setAttribute('aria-describedby', 'owner-period-hint owner-period-error');
 
   function recomputePeriod() {
     const count = parseInt(countInput.value, 10);
@@ -103,6 +107,8 @@ export function renderStep2Secret(container, state, onNext, onBack) {
   countInput.addEventListener('input', recomputePeriod);
 
   const presetRow = el('div', { class: 'dmh-chip-row' });
+  presetRow.setAttribute('role', 'group');
+  presetRow.setAttribute('aria-label', 'Quick inactivity period choices');
   for (const preset of QUICK_PRESETS) {
     const btn = el('button', { class: 'dmh-chip dmh-chip-small', type: 'button' }, preset.label);
     btn.addEventListener('click', () => {
@@ -117,31 +123,43 @@ export function renderStep2Secret(container, state, onNext, onBack) {
   }
 
   const secretInput = el('input', {
+    id: 'owner-secret',
     class: 'dmh-input mono',
     type: 'password',
-    autocomplete: 'off',
+    autocomplete: 'new-password',
     autocapitalize: 'off',
     spellcheck: 'false',
     placeholder: 'Enter a long, unique secret phrase',
   });
   const confirmInput = el('input', {
+    id: 'owner-secret-confirm',
     class: 'dmh-input mono',
     type: 'password',
-    autocomplete: 'off',
+    autocomplete: 'new-password',
     autocapitalize: 'off',
     spellcheck: 'false',
     placeholder: 'Re-enter the same secret',
   });
 
-  const entropyFeedback = el('div', { class: 'dmh-hint' }, 'Enter a secret to check its strength.');
-  const matchFeedback = el('div', { class: 'dmh-error-text' });
+  const entropyFeedback = el('div', { class: 'dmh-hint', id: 'owner-secret-strength', role: 'status', 'aria-live': 'polite' }, 'Enter a secret to check its strength.');
+  const matchFeedback = el('div', { class: 'dmh-error-text', id: 'owner-secret-match', role: 'alert', 'aria-live': 'assertive' });
+  secretInput.setAttribute('aria-describedby', 'owner-secret-strength');
+  confirmInput.setAttribute('aria-describedby', 'owner-secret-match');
 
-  const toggleShowBtn = el('button', { class: 'dmh-input-icon-btn', type: 'button' }, '👁');
+  const toggleShowBtn = el('button', {
+    class: 'dmh-input-icon-btn',
+    type: 'button',
+    'aria-label': 'Show secret phrases',
+    'aria-controls': 'owner-secret owner-secret-confirm',
+    'aria-pressed': 'false',
+  }, 'Show');
   toggleShowBtn.addEventListener('click', () => {
     showSecret = !showSecret;
     secretInput.type = showSecret ? 'text' : 'password';
     confirmInput.type = showSecret ? 'text' : 'password';
-    toggleShowBtn.textContent = showSecret ? '🙈' : '👁';
+    toggleShowBtn.textContent = showSecret ? 'Hide' : 'Show';
+    toggleShowBtn.setAttribute('aria-label', showSecret ? 'Hide secret phrases' : 'Show secret phrases');
+    toggleShowBtn.setAttribute('aria-pressed', String(showSecret));
   });
 
   function updateEntropyFeedback() {
@@ -153,7 +171,7 @@ export function renderStep2Secret(container, state, onNext, onBack) {
       return;
     }
     if (entropyResult.ok) {
-      entropyFeedback.textContent = `✓ Strong secret (~${entropyResult.entropyBits.toFixed(0)} bits estimated entropy).`;
+      entropyFeedback.textContent = `Strong secret (~${entropyResult.entropyBits.toFixed(0)} bits estimated entropy).`;
       entropyFeedback.className = 'dmh-hint';
       entropyFeedback.style.color = 'var(--dmh-green-phosphor)';
     } else {
@@ -179,7 +197,7 @@ export function renderStep2Secret(container, state, onNext, onBack) {
     updateMatchFeedback();
   });
 
-  const continueBtn = el('button', { class: 'dmh-btn dmh-btn-primary' }, 'Continue');
+  const continueBtn = el('button', { class: 'dmh-btn dmh-btn-primary', type: 'button' }, 'Continue');
 
   function updateContinueState() {
     const periodOk = periodValue >= MIN_SECONDS && periodValue <= MAX_SECONDS;
@@ -221,7 +239,7 @@ export function renderStep2Secret(container, state, onNext, onBack) {
       el('p', { class: 'dmh-subheading' }, 'Anyone who knows this secret — after you go inactive past the period below — can claim the assets you protect. Never share it casually. Only give it to whoever should inherit access.'),
 
       el('div', { class: 'dmh-field' }, [
-        el('label', { class: 'dmh-label' }, 'Inactivity period — choose any duration'),
+        el('label', { class: 'dmh-label', for: 'owner-inactivity-count' }, 'Inactivity period — choose any duration'),
         el('div', { class: 'dmh-hint' }, 'Quick picks:'),
         presetRow,
         el('div', { class: 'dmh-inline-row' }, [
@@ -233,18 +251,18 @@ export function renderStep2Secret(container, state, onNext, onBack) {
       ]),
 
       el('div', { class: 'dmh-field' }, [
-        el('label', { class: 'dmh-label' }, 'Secret phrase'),
+        el('label', { class: 'dmh-label', for: 'owner-secret' }, 'Secret phrase'),
         el('div', { class: 'dmh-input-wrap' }, [secretInput, toggleShowBtn]),
         entropyFeedback,
       ]),
 
       el('div', { class: 'dmh-field' }, [
-        el('label', { class: 'dmh-label' }, 'Confirm secret'),
+        el('label', { class: 'dmh-label', for: 'owner-secret-confirm' }, 'Confirm secret'),
         confirmInput,
         matchFeedback,
       ]),
 
-      el('div', { class: 'dmh-warning-banner' }, "This secret is hashed on your device only and never sent anywhere in plaintext. But the hash itself is public forever on-chain — a weak secret CAN be brute-forced offline, which is why we require real entropy here."),
+      el('div', { class: 'dmh-warning-banner' }, "During vault creation, this secret is hashed on your device and only the creation hash is submitted on-chain; the plaintext is not sent. The creation hash is public forever, so a weak secret can be brute-forced offline. A later claimant must submit the plaintext secret in a claim transaction, which is public on-chain and is not private."),
     ])
   );
   container.appendChild(renderStickyCta(continueBtn));

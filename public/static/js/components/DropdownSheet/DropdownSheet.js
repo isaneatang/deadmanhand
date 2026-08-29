@@ -21,10 +21,12 @@
 import { el } from '../theme/ui.js';
 
 export function openBottomSheet({ title, options, selectedValue, onSelect }) {
+  const previousFocus = document.activeElement;
+  const titleId = `dmh-sheet-title-${Date.now()}`;
   const overlay = el('div', { class: 'dmh-sheet-overlay' });
   const rows = options.map((opt) => {
     const isSelected = opt.value === selectedValue;
-    const row = el('div', { class: `dmh-sheet-row${isSelected ? ' selected' : ''}` }, [
+    const row = el('button', { class: `dmh-sheet-row${isSelected ? ' selected' : ''}`, type: 'button', role: 'option', 'aria-selected': String(isSelected) }, [
       el('div', {}, [
         el('div', {}, opt.label),
         opt.description ? el('div', { class: 'dmh-sheet-row-desc' }, opt.description) : null,
@@ -38,10 +40,14 @@ export function openBottomSheet({ title, options, selectedValue, onSelect }) {
     return row;
   });
 
-  const sheet = el('div', { class: 'dmh-sheet' }, [
+  const closeBtn = el('button', { class: 'dmh-sheet-close', type: 'button', 'aria-label': 'Close picker' }, 'Close');
+  const sheet = el('div', { class: 'dmh-sheet', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId }, [
     el('div', { class: 'dmh-sheet-handle' }),
-    title ? el('div', { class: 'dmh-sheet-title' }, title) : null,
-    ...rows,
+    el('div', { class: 'dmh-sheet-header' }, [
+      title ? el('div', { id: titleId, class: 'dmh-sheet-title' }, title) : el('div', { id: titleId, class: 'dmh-sheet-title' }, 'Choose an option'),
+      closeBtn,
+    ]),
+    el('div', { role: 'listbox', 'aria-labelledby': titleId }, rows),
   ]);
 
   overlay.appendChild(sheet);
@@ -51,6 +57,7 @@ export function openBottomSheet({ title, options, selectedValue, onSelect }) {
   requestAnimationFrame(() => {
     overlay.classList.add('open');
     sheet.classList.add('open');
+    (rows.find((row) => row.getAttribute('aria-selected') === 'true') || rows[0] || closeBtn).focus();
   });
 
   function close() {
@@ -58,8 +65,29 @@ export function openBottomSheet({ title, options, selectedValue, onSelect }) {
     sheet.classList.remove('open');
     setTimeout(() => {
       if (overlay.parentNode) document.body.removeChild(overlay);
+      if (previousFocus && previousFocus.isConnected) previousFocus.focus();
     }, 250);
+    document.removeEventListener('keydown', onKeyDown);
   }
+
+  function onKeyDown(event) {
+    if (event.key === 'Escape') close();
+    if (event.key === 'Tab') {
+      const focusable = Array.from(sheet.querySelectorAll('button:not([disabled]), [tabindex]:not([tabindex="-1"])'));
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+  }
+
+  closeBtn.addEventListener('click', close);
+  document.addEventListener('keydown', onKeyDown);
 
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) close();
@@ -74,7 +102,7 @@ export function openBottomSheet({ title, options, selectedValue, onSelect }) {
  */
 export function renderSelectField({ label, options, initialValue, onChange, hint }) {
   let currentValue = initialValue;
-  const trigger = el('div', { class: 'dmh-select-trigger' }, [
+  const trigger = el('button', { class: 'dmh-select-trigger', type: 'button', 'aria-haspopup': 'dialog' }, [
     el('span', { class: 'trigger-label' }, resolveLabel(options, currentValue)),
     el('span', { class: 'chevron' }, '▾'),
   ]);
@@ -133,9 +161,11 @@ export function renderChipGroup({ options, initialValue, onChange }) {
       currentValue = opt.value;
       for (const b of buttons) b.classList.remove('selected');
       btn.classList.add('selected');
+      buttons.forEach((button) => button.setAttribute('aria-pressed', String(button === btn)));
       onChange && onChange(currentValue);
     });
     buttons.push(btn);
+    btn.setAttribute('aria-pressed', String(opt.value === currentValue));
     row.appendChild(btn);
   }
 
@@ -144,7 +174,11 @@ export function renderChipGroup({ options, initialValue, onChange }) {
     getValue: () => currentValue,
     setValue: (value) => {
       currentValue = value;
-      buttons.forEach((b, i) => b.classList.toggle('selected', options[i].value === value));
+      buttons.forEach((b, i) => {
+        const selected = options[i].value === value;
+        b.classList.toggle('selected', selected);
+        b.setAttribute('aria-pressed', String(selected));
+      });
     },
   };
 }

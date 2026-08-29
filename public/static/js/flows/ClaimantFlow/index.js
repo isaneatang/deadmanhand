@@ -7,8 +7,11 @@ import { renderStep4Result } from './Step4Result.js';
 
 export function renderClaimantFlow(container) {
   const state = createClaimState();
+  let cleanupCurrentStep = null;
 
   function goToStep(step) {
+    if (cleanupCurrentStep) cleanupCurrentStep();
+    cleanupCurrentStep = null;
     state.step = step;
     container.innerHTML = '';
     switch (step) {
@@ -16,7 +19,7 @@ export function renderClaimantFlow(container) {
         renderStep1Lookup(container, state, () => goToStep(2));
         break;
       case 2:
-        renderStep2Status(container, state, () => goToStep(3), () => goToStep(1));
+        cleanupCurrentStep = renderStep2Status(container, state, () => goToStep(3), () => goToStep(1));
         break;
       case 3:
         renderStep3SecretEntry(container, state, () => goToStep(4), () => goToStep(2));

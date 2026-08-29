@@ -7,33 +7,28 @@ all that's granted). If the owner goes inactive past a chosen period, anyone
 who knows the secret can claim the registered assets, paying a flat fee that
 escalates (temporarily) on repeated wrong guesses.
 
-## ⚠️ Current Status: Contract Deployed to Testnet, Frontend NOT Yet Deployed
+## Current Status: Contract Deployed to Testnet, Frontend Not Yet Deployed
 
 This is an honest status report, not a "done" claim. See the checklist below.
 
 | Area | Status |
 |---|---|
-| Smart contract (`contracts/DeadMansHand.sol`) | ✅ Written, 25/25 Hardhat tests passing |
-| Contract deployed to testnet | ✅ **Deployed** — `0x6bAc4F39e81955FD1Be3C890bd158aF0D08701af` on BOT Chain Testnet (chainId 968), verified on-chain |
-| Contract deployed to mainnet | ❌ **Not deployed** — not requested yet |
-| Frontend (Hono/Vite SPA, all flows) | ✅ Written, builds clean, runs in sandbox dev preview, zero console errors on **desktop** Playwright check |
-| Cloudflare Pages production deploy | ❌ **Not deployed** — needs your decision on deploy path (see below) |
-| Real mobile-wallet in-app-browser test (MetaMask mobile, spec-mandated minimum bar) | ❌ **Not done** — only desktop browser has been checked |
-| Git commit of this session's work | ✅ Done as of this commit |
+| Smart contract (`contracts/DeadMansHand.sol`) | Written; test suite included |
+| Contract deployed to testnet | Deployed at `0x6bAc4F39e81955FD1Be3C890bd158aF0D08701af` on BOT Chain Testnet (chain ID 968) |
+| Contract deployed to mainnet | Not deployed; mainnet transactions are unavailable |
+| Frontend (Hono/Vite SPA, all flows) | Rebuilt and source-checked; production build must run on supported Node 20-24 |
+| Production deploy | Not deployed |
+| Real mobile-wallet in-app-browser test | Not completed; MetaMask Mobile remains the minimum acceptance test |
 
 ### Open decisions blocking full completion
 
-1. **Cloudflare deployment path.** Two deploy options are available for this
-   sandbox: deploying to *your own* Cloudflare account (BYOK, full wrangler
-   control) or a Genspark-managed hosted deploy (no token needed from you).
-   I have not deployed the web app anywhere yet — tell me which you want.
+1. **Deployment target.** The current package is configured for Vercel. Confirm
+   the production account/project before running `npm run deploy`.
 2. **Real mobile wallet test.** The spec explicitly requires testing inside a
    real mobile wallet's in-app browser (MetaMask mobile at minimum) before
    this can be considered spec-complete. That can only happen once the app
    is actually deployed to a reachable URL — it can't be done meaningfully
    against the sandbox-only dev preview.
-
-Once you answer #1, I can finish deployment and then do #2.
 
 ---
 
@@ -44,12 +39,12 @@ Once you answer #1, I can finish deployment and then do #2.
   never custodies assets during normal operation; it only calls
   `transferFrom` / `safeTransferFrom` at successful-claim time, using
   allowances the owner granted directly from their own wallet.
-- **Frontend**: Hono + Vite, deployed as a Cloudflare Pages Worker serving a
+- **Frontend**: Hono + Vite, configured for Vercel and serving a
   hash-routed (`#/...`) vanilla-JS SPA from `public/static/js/`. No frontend
   framework — plain DOM manipulation, `ethers.js` v6.13.4 pinned via
   `esm.sh` CDN as the sole wallet/hashing/contract library.
 - **No off-chain database.** All vault state lives on-chain in the contract.
-  The Cloudflare Worker only serves static assets; it holds no server-side
+  The web application only serves the app shell and static assets; it holds no server-side
   persistence (no D1/KV/R2 needed for this app).
 
 ### Contract data model
@@ -125,20 +120,20 @@ in-app WebViews (they don't rely on `pushState`/server routing).
 | `previewFee(vaultId)` | Anyone (view) | Current fee a claim attempt would cost right now |
 | `getVaultTokens(vaultId)` / `getOwnerVaults(owner)` / `getFailedAttempts(vaultId)` | Anyone (view) | Read helpers |
 
-## Security notes
+## Security Notes
 
-- Secret plaintext is **never** sent anywhere off-device. Hashing
-  (`keccak256`) happens entirely client-side via `ethers.js`; the plaintext
-  is cleared from the input field and JS closure immediately after the hash
-  is computed / the unlock tx is submitted.
+- During vault creation, the secret is hashed locally and only the salted hash
+  is submitted. During a claim, the deployed contract requires
+  `attemptUnlock(vaultId, secretPlaintext)`, so the plaintext secret is public
+  transaction calldata and becomes permanently visible on-chain. Fixing this
+  requires a redesigned claim protocol and a new contract deployment; it
+  cannot be solved by a frontend-only hash.
 - No native `<select>` element is used anywhere in the UI (spec requirement);
   all "choose one of several" UI uses custom bottom-sheet/chip-group
   components (`components/DropdownSheet/`).
-- All UNVERIFIED values (testnet fee-token address, unset contract addresses)
-  are explicitly `null` in `public/static/js/config/network.js` with comments
-  explaining why, and the UI shows an explanatory "not available" banner
-  instead of a fabricated `0` balance. `scripts/deploy.cjs` throws rather than
-  guessing a fee-token address if `FEE_TOKEN_ADDRESS` isn't provided.
+- The testnet fee-token and DMH addresses are configured. The mainnet DMH
+  address remains explicitly `null`, so mainnet vault operations fail closed.
+  `scripts/deploy.cjs` throws rather than guessing deployment values.
 
 ## Networks
 
@@ -159,13 +154,13 @@ Single-file network switch: `public/static/js/config/network.js`.
 ```bash
 npm install
 npm run build
-pm2 start ecosystem.config.cjs   # runs `wrangler pages dev dist --port 3000`
+npm run dev
 ```
 
 Contract tests:
 
 ```bash
-npx hardhat test    # 25 passing
+npm run test:contracts
 ```
 
 Contract deploy (requires env vars — will throw if `FEE_TOKEN_ADDRESS` or
@@ -182,14 +177,14 @@ command above and paste the new address into `network.js`.
 ## Not yet implemented / not yet done
 
 - Contract not deployed to mainnet (only testnet so far).
-- Cloudflare Pages production deploy not done (see Open Decisions #1).
+- Production frontend deployment not done.
 - Real mobile-wallet in-app-browser manual test pass not done (see Open
   Decisions #2) — this is a spec-mandated bar, not optional polish.
 
 ## Recommended next steps
 
-1. Answer the Cloudflare deploy-path decision above.
-2. Deploy the frontend to Cloudflare Pages.
+1. Confirm the production Vercel project and account.
+2. Deploy the frontend.
 3. Test the whole flow inside MetaMask mobile's in-app browser on a real
    phone, on testnet, before considering this production-ready.
 4. Deploy to mainnet once testnet is fully verified end-to-end.

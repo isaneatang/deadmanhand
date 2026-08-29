@@ -1,11 +1,9 @@
 node_modules/
 dist/
-.wrangler/
 cache-hardhat/
 artifacts/
 typechain-types/
 .env
-.dev.vars
 pids
 *.pid
 *.seed

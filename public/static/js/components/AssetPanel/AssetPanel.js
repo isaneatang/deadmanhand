@@ -13,6 +13,8 @@ import { getReadOnlyProvider } from '../../lib/wallet.js';
 import { getErc20ReadContract } from '../../lib/contract.js';
 import { el, showToast } from '../theme/ui.js';
 
+const MAX_SELECTED_ASSETS = 50;
+
 /**
  * @param {object} opts
  * @param {string} opts.address - the wallet address to display holdings for
@@ -24,22 +26,42 @@ export function renderAssetPanel({ address, selectable = false, onSelectionChang
   const net = getNetworkConfig();
   const container = el('div', { class: 'dmh-card' });
   const selected = new Map(); // tokenAddress -> asset
+  let selectionFeedback = null;
+
+  function assetKey(asset) {
+    return asset.address.toLowerCase();
+  }
+
+  function updateSelectionFeedback(limitReached = false) {
+    if (!selectionFeedback) return;
+    selectionFeedback.textContent = limitReached || selected.size >= MAX_SELECTED_ASSETS
+      ? `Maximum ${MAX_SELECTED_ASSETS} assets selected. Remove one to select another.`
+      : `${selected.size} of ${MAX_SELECTED_ASSETS} assets selected.`;
+  }
 
   function notifySelectionChange() {
+    updateSelectionFeedback();
     onSelectionChange && onSelectionChange(Array.from(selected.values()));
   }
 
   function iconOrFallback(iconUrl, symbol) {
-    if (iconUrl) {
-      const img = el('img', { src: iconUrl, alt: symbol, onError: (e) => { e.target.style.display = 'none'; } });
-      return el('div', { class: 'dmh-asset-icon' }, img);
+    try {
+      const resolved = new URL(iconUrl, net.explorerUrl);
+      if (iconUrl && resolved.origin === new URL(net.explorerUrl).origin) {
+        const img = el('img', { src: resolved.href, alt: '', onError: (e) => { e.target.style.display = 'none'; } });
+        return el('div', { class: 'dmh-asset-icon', 'aria-hidden': 'true' }, img);
+      }
+    } catch (_e) {
+      // Fall through to the local text fallback for invalid/untrusted URLs.
     }
-    return el('div', { class: 'dmh-asset-icon' }, (symbol || '?').slice(0, 3).toUpperCase());
+    return el('div', { class: 'dmh-asset-icon', 'aria-hidden': 'true' }, (symbol || '?').slice(0, 3).toUpperCase());
   }
 
   function renderAssetRow(asset, opts = {}) {
     const { toggleable = false, alreadySelected = false } = opts;
-    const balanceDisplay = asset.decimals != null
+    const balanceDisplay = asset.balanceUnavailable
+      ? 'Balance unavailable'
+      : asset.decimals != null
       ? formatTokenAmount(asset.rawValue, asset.decimals)
       : asset.rawValue;
 
@@ -47,26 +69,39 @@ export function renderAssetPanel({ address, selectable = false, onSelectionChang
       iconOrFallback(asset.iconUrl, asset.symbol),
       el('div', { class: 'dmh-asset-info' }, [
         el('div', { class: 'dmh-asset-symbol' }, asset.symbol),
-        el('div', { class: 'dmh-asset-balance mono' }, `${balanceDisplay} · ${asset.type || 'ERC-20'}`),
+        el('div', { class: 'dmh-asset-balance mono' }, `${balanceDisplay} · ${asset.displayType || asset.type || 'ERC-20'}`),
       ]),
     ]);
 
     if (toggleable) {
       let isOn = alreadySelected;
       const knob = el('div', { class: 'dmh-toggle-knob' });
-      const toggle = el('div', { class: `dmh-toggle${isOn ? ' on' : ''}` }, knob);
+      const toggle = el('button', {
+        class: `dmh-toggle${isOn ? ' on' : ''}`,
+        style: 'padding:0;',
+        type: 'button',
+        role: 'switch',
+        'aria-checked': String(isOn),
+        'aria-label': `Include ${asset.symbol} in vault`,
+      }, knob);
       toggle.addEventListener('click', () => {
+        if (!isOn && selected.size >= MAX_SELECTED_ASSETS) {
+          updateSelectionFeedback(true);
+          showToast(`You can select up to ${MAX_SELECTED_ASSETS} assets.`, 'error');
+          return;
+        }
         isOn = !isOn;
         toggle.classList.toggle('on', isOn);
+        toggle.setAttribute('aria-checked', String(isOn));
         if (isOn) {
-          selected.set(asset.address, asset);
+          selected.set(assetKey(asset), asset);
         } else {
-          selected.delete(asset.address);
+          selected.delete(assetKey(asset));
         }
         notifySelectionChange();
       });
       row.appendChild(toggle);
-      if (isOn) selected.set(asset.address, asset);
+      if (isOn) selected.set(assetKey(asset), asset);
     }
 
     return row;
@@ -88,8 +123,9 @@ export function renderAssetPanel({ address, selectable = false, onSelectionChang
         })
       );
     } catch (e) {
-      rows.push(el('div', { class: 'dmh-hint' }, `Could not load native ${net.nativeCurrency.symbol} balance: ${e.message}`));
+      rows.push(el('div', { class: 'dmh-hint' }, `Native ${net.nativeCurrency.symbol} balance is unavailable.`));
     }
+    rows.push(el('div', { class: 'dmh-hint' }, `Native ${net.nativeCurrency.symbol} is unsupported for vault protection and is display-only.`));
 
     if (net.usdtAddress) {
       try {
@@ -99,14 +135,32 @@ export function renderAssetPanel({ address, selectable = false, onSelectionChang
           renderAssetRow({
             address: net.usdtAddress,
             symbol: 'USDT',
-            type: 'ERC-20 (fee token)',
+            type: 'ERC-20',
+            displayType: 'ERC-20 (fee token)',
             decimals: Number(decimals),
             rawValue: balance.toString(),
             iconUrl: null,
+          }, {
+            toggleable: selectable,
+            alreadySelected: selected.has(net.usdtAddress.toLowerCase()),
           })
         );
       } catch (e) {
-        rows.push(el('div', { class: 'dmh-hint' }, `Could not load USDT balance: ${e.message}`));
+        rows.push(
+          renderAssetRow({
+            address: net.usdtAddress,
+            symbol: 'USDT',
+            type: 'ERC-20',
+            displayType: 'ERC-20 (fee token)',
+            decimals: net.usdtDecimals,
+            rawValue: null,
+            balanceUnavailable: true,
+            iconUrl: null,
+          }, {
+            toggleable: selectable,
+            alreadySelected: selected.has(net.usdtAddress.toLowerCase()),
+          })
+        );
       }
     } else {
       // Per spec: hide cleanly rather than showing a broken 0 / error state.
@@ -125,25 +179,30 @@ export function renderAssetPanel({ address, selectable = false, onSelectionChang
       // USDT already shown above; avoid duplicate row if it appears in the scan too.
       return tokens.filter((t) => !net.usdtAddress || t.address.toLowerCase() !== net.usdtAddress.toLowerCase());
     } catch (e) {
-      return { failed: true, error: e };
+      return { failed: true };
     }
   }
 
   function renderManualPasteFallback(onAdd) {
-    const input = el('input', { class: 'dmh-input mono', placeholder: '0x... token contract address', type: 'text' });
-    const typeChips = el('div', { class: 'dmh-chip-row', style: 'margin-top:8px;' });
+    const inputId = `dmh-manual-token-${address.slice(2).toLowerCase()}`;
+    const input = el('input', { id: inputId, class: 'dmh-input mono', placeholder: '0x... token contract address', type: 'text' });
+    const typeChips = el('div', { class: 'dmh-chip-row', style: 'margin-top:8px;', role: 'group', 'aria-label': 'Token type' });
     let manualType = 'ERC-20';
-    const chipErc20 = el('button', { class: 'dmh-chip selected', type: 'button' }, 'ERC-20');
-    const chipErc721 = el('button', { class: 'dmh-chip', type: 'button' }, 'ERC-721 (NFT collection)');
+    const chipErc20 = el('button', { class: 'dmh-chip selected', type: 'button', 'aria-pressed': 'true' }, 'ERC-20');
+    const chipErc721 = el('button', { class: 'dmh-chip', type: 'button', 'aria-pressed': 'false' }, 'ERC-721 (NFT collection)');
     chipErc20.addEventListener('click', () => {
       manualType = 'ERC-20';
       chipErc20.classList.add('selected');
       chipErc721.classList.remove('selected');
+      chipErc20.setAttribute('aria-pressed', 'true');
+      chipErc721.setAttribute('aria-pressed', 'false');
     });
     chipErc721.addEventListener('click', () => {
       manualType = 'ERC-721';
       chipErc721.classList.add('selected');
       chipErc20.classList.remove('selected');
+      chipErc721.setAttribute('aria-pressed', 'true');
+      chipErc20.setAttribute('aria-pressed', 'false');
     });
     typeChips.appendChild(chipErc20);
     typeChips.appendChild(chipErc721);
@@ -156,24 +215,31 @@ export function renderAssetPanel({ address, selectable = false, onSelectionChang
         return;
       }
       const checksummed = ethers.getAddress(raw);
+      if (/^0x0{40}$/i.test(checksummed)) {
+        showToast('Enter a valid token contract address.', 'error');
+        return;
+      }
       addBtn.disabled = true;
       try {
         let meta;
         try {
           meta = await lookupTokenMetadata(checksummed);
-        } catch (_e) {
+        } catch (error) {
+          if (error.code === 'UNSUPPORTED_TOKEN_TYPE') {
+            showToast('Only ERC-20 tokens and ERC-721 collections are supported.', 'error');
+            return;
+          }
           meta = { address: checksummed, symbol: '???', name: 'Unknown Token', decimals: 0, type: manualType, iconUrl: null };
         }
-        onAdd({ ...meta, type: manualType, rawValue: '0' });
+        onAdd({ ...meta, rawValue: null, balanceUnavailable: true });
         input.value = '';
-        showToast('Token added.', 'success', 2000);
       } finally {
         addBtn.disabled = false;
       }
     });
 
     return el('div', { class: 'dmh-field', style: 'margin-top: 8px;' }, [
-      el('label', { class: 'dmh-label' }, "Can't see your token? Paste its contract address"),
+      el('label', { class: 'dmh-label', for: inputId }, "Can't see your token? Paste its contract address"),
       input,
       typeChips,
       addBtn,
@@ -193,12 +259,17 @@ export function renderAssetPanel({ address, selectable = false, onSelectionChang
 
     container.innerHTML = '';
     container.appendChild(el('div', { class: 'dmh-card-title' }, 'Wallet Holdings'));
+    if (selectable) {
+      selectionFeedback = el('div', { class: 'dmh-hint', role: 'status', 'aria-live': 'polite' });
+      container.appendChild(selectionFeedback);
+      updateSelectionFeedback();
+    }
     nativeRows.forEach((r) => container.appendChild(r));
 
     if (scanResult && scanResult.failed) {
       container.appendChild(
         el('div', { class: 'dmh-warning-banner' }, [
-          `Could not scan your other holdings (${scanResult.error.message}). You can still add tokens manually below.`,
+          'Could not scan your other holdings right now. You can still add tokens manually below.',
         ])
       );
     } else if (scanResult && scanResult.length > 0) {
@@ -207,7 +278,7 @@ export function renderAssetPanel({ address, selectable = false, onSelectionChang
         container.appendChild(
           renderAssetRow(
             { ...token, address: token.address },
-            { toggleable: selectable }
+            { toggleable: selectable, alreadySelected: selected.has(assetKey(token)) }
           )
         );
       }
@@ -215,14 +286,36 @@ export function renderAssetPanel({ address, selectable = false, onSelectionChang
       container.appendChild(el('div', { class: 'dmh-empty-state' }, 'No other tokens/NFTs found for this address.'));
     }
 
+    const visibleAddresses = new Set(
+      Array.isArray(scanResult) ? scanResult.map((token) => assetKey(token)) : []
+    );
+    if (net.usdtAddress) visibleAddresses.add(net.usdtAddress.toLowerCase());
+    for (const [key, asset] of selected) {
+      if (!visibleAddresses.has(key)) {
+        container.appendChild(renderAssetRow(asset, { toggleable: true, alreadySelected: true }));
+      }
+    }
+
     if (selectable) {
       container.appendChild(
         renderManualPasteFallback((asset) => {
+          const key = assetKey(asset);
+          if (selected.has(key)) {
+            showToast('That asset is already selected.', 'info', 2500);
+            return;
+          }
+          if (!selected.has(key) && selected.size >= MAX_SELECTED_ASSETS) {
+            updateSelectionFeedback(true);
+            showToast(`You can select up to ${MAX_SELECTED_ASSETS} assets.`, 'error');
+            return;
+          }
+          selected.set(key, asset);
           container.insertBefore(
             renderAssetRow(asset, { toggleable: true, alreadySelected: true }),
             container.lastElementChild
           );
           notifySelectionChange();
+          showToast('Token added. Balance unavailable.', 'success', 2500);
         })
       );
     }

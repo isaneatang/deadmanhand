@@ -5,25 +5,43 @@ import { getNetworkConfig } from '../../config/network.js';
 
 export function renderStep1Connect(container, state, onNext) {
   const net = getNetworkConfig();
+  const walletAvailable = isWalletAvailable();
+  const statusEl = el('div', {
+    class: 'dmh-card',
+    role: 'status',
+    'aria-live': 'polite',
+    'aria-atomic': 'true',
+  }, [
+    el('div', { class: 'dmh-card-title' }, 'Connection status'),
+    el('p', { class: 'dmh-hint', id: 'owner-connect-status' }, walletAvailable
+      ? `Ready to connect. Your wallet will then be checked for ${net.chainName}.`
+      : 'No compatible wallet was detected.'),
+  ]);
+  const statusText = statusEl.querySelector('#owner-connect-status');
 
   const connectBtn = el(
     'button',
-    { class: 'dmh-btn dmh-btn-primary' },
-    isWalletAvailable() ? 'Connect wallet' : 'No wallet detected'
+    { class: 'dmh-btn dmh-btn-primary', type: 'button', 'aria-describedby': 'owner-connect-status' },
+    walletAvailable ? 'Connect wallet' : 'No wallet detected'
   );
-  connectBtn.disabled = !isWalletAvailable();
+  connectBtn.disabled = !walletAvailable;
 
   connectBtn.addEventListener('click', async () => {
     connectBtn.disabled = true;
     connectBtn.textContent = 'Connecting…';
+    statusText.textContent = 'Step 1 of 2: waiting for wallet connection approval.';
     try {
       const address = await connectWallet();
+      statusText.textContent = `Step 2 of 2: wallet connected. Checking ${net.chainName} network.`;
       await ensureCorrectNetwork();
       state.address = address;
+      statusText.textContent = `Connected and ready on ${net.chainName}.`;
       showToast('Wallet connected.', 'success', 2000);
       onNext();
     } catch (e) {
-      showToast(e.message || 'Connection failed.', 'error');
+      const message = e.message || 'Connection failed.';
+      statusText.textContent = `Connection not completed: ${message}`;
+      showToast(message, 'error');
       connectBtn.disabled = false;
       connectBtn.textContent = 'Connect wallet';
     }
@@ -38,6 +56,8 @@ export function renderStep1Connect(container, state, onNext) {
       !isWalletAvailable()
         ? el('div', { class: 'dmh-warning-banner' }, "No wallet extension/in-app browser detected. Open this page inside a wallet app (MetaMask, OKX, Trust Wallet, etc.) or install a browser wallet extension.")
         : null,
+
+      statusEl,
 
       el('div', { class: 'dmh-card' }, [
         el('div', { class: 'dmh-card-title' }, 'Why per-token approval?'),

@@ -26,8 +26,15 @@ export function navigate(path) {
 }
 
 function renderApp() {
-  root.innerHTML = '';
+  root.replaceChildren();
   const { path, params } = parseRoute();
+  const routeTitles = {
+    '': "Dead Man's Hand",
+    setup: "Set Up a Vault | Dead Man's Hand",
+    claim: "Claim a Vault | Dead Man's Hand",
+    dashboard: "Vault Dashboard | Dead Man's Hand",
+  };
+  document.title = routeTitles[path] || routeTitles[''];
 
   root.appendChild(renderTopBar(() => renderApp()));
 
@@ -51,6 +58,14 @@ function renderApp() {
     default:
       renderHome(content);
   }
+
+  requestAnimationFrame(() => {
+    const heading = content.querySelector('h1');
+    if (heading) {
+      heading.tabIndex = -1;
+      heading.focus({ preventScroll: true });
+    }
+  });
 }
 
 window.addEventListener('hashchange', renderApp);

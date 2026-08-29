@@ -1,5 +1,5 @@
 // flows/ClaimantFlow/Step4Result.js — Step 4: Result — success (itemized) or failure (attempts/cooldown info)
-import { el, renderStepIndicator, renderStickyCta, formatAddress } from '../../components/theme/ui.js';
+import { el, renderStepIndicator, renderStickyCta, formatAddress, formatDuration } from '../../components/theme/ui.js';
 import { getFailedAttempts, getVaultStatus } from '../../lib/contract.js';
 import { getNetworkConfig } from '../../config/network.js';
 import { ethers } from '../../lib/ethers.js';
@@ -80,13 +80,22 @@ export async function renderStep4Result(container, state) {
 
     body.push(
       el('div', { class: 'dmh-warning-banner' }, [
-        cooldown
-          ? `This vault is now in a cooldown lockout. Try again later.`
+        cooldown != null
+          ? `This vault is now in a cooldown lockout. Try again in ${formatDuration(cooldown)}.`
           : failedAttempts != null
             ? `Failed attempts so far: ${failedAttempts}. The fee escalates with each consecutive failure, and the vault locks temporarily after enough failures.`
             : 'The fee escalates with each consecutive failure.',
       ])
     );
+  }
+
+  const transactionHash = r.receipt && (r.receipt.hash || r.receipt.transactionHash);
+  if (transactionHash) {
+    body.push(el('div', { class: 'dmh-card' }, [
+      el('div', { class: 'dmh-card-title' }, 'Transaction'),
+      el('div', { class: 'mono', style: 'font-size:12px; word-break:break-all;' }, transactionHash),
+      el('a', { class: 'dmh-btn dmh-btn-secondary', href: `${net.explorerUrl}/tx/${transactionHash}`, target: '_blank', rel: 'noopener noreferrer', 'aria-label': 'View claim transaction in block explorer (opens in a new tab)' }, 'View in explorer'),
+    ]));
   }
 
   container.appendChild(renderStepIndicator(4, 4));

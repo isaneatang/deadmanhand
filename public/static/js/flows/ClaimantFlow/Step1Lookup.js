@@ -1,35 +1,41 @@
 // flows/ClaimantFlow/Step1Lookup.js — Step 1: Lookup — address field primary, vaultId secondary/advanced
-import { el, renderStepIndicator, renderStickyCta, showToast } from '../../components/theme/ui.js';
+import { el, renderStepIndicator, renderStickyCta, formatDuration } from '../../components/theme/ui.js';
 import { ethers } from '../../lib/ethers.js';
 import { lookupVaultsByAddress, getVaultOwner, getVaultStatus } from '../../lib/contract.js';
 import { DmhNotDeployedError } from '../../lib/contract.js';
 
 export function renderStep1Lookup(container, state, onFound) {
-  const addressInput = el('input', { class: 'dmh-input mono', type: 'text', placeholder: '0x… former owner address', autocapitalize: 'off', spellcheck: 'false' });
-  const vaultIdInput = el('input', { class: 'dmh-input mono', type: 'text', placeholder: '0x… vault ID (64 hex chars)', autocapitalize: 'off', spellcheck: 'false' });
-  const errorEl = el('div', { class: 'dmh-error-text' });
+  const formId = 'claimant-vault-lookup-form';
+  const addressInput = el('input', { id: 'claimant-owner-address', class: 'dmh-input mono', type: 'text', placeholder: '0x… former owner address', autocapitalize: 'off', spellcheck: 'false' });
+  const vaultIdInput = el('input', { id: 'claimant-vault-id', class: 'dmh-input mono', type: 'text', placeholder: '0x… vault ID (64 hex chars)', autocapitalize: 'off', spellcheck: 'false' });
+  const errorEl = el('div', { class: 'dmh-error-text', role: 'alert', 'aria-live': 'assertive' });
+  const choicesEl = el('div', { 'aria-live': 'polite' });
 
   let advancedOpen = false;
-  const advancedToggle = el('button', { class: 'dmh-btn dmh-btn-secondary', style: 'margin-top: 4px;' }, 'Use vault ID instead (advanced)');
-  const advancedSection = el('div', { class: 'dmh-field', style: 'display:none;' }, [
-    el('label', { class: 'dmh-label' }, 'Vault ID (exact lookup)'),
+  const advancedToggle = el('button', { class: 'dmh-btn dmh-btn-secondary', type: 'button', style: 'margin-top: 4px;', 'aria-expanded': 'false', 'aria-controls': 'claimant-vault-id-section' }, 'Use vault ID instead (advanced)');
+  const advancedSection = el('div', { id: 'claimant-vault-id-section', class: 'dmh-field', style: 'display:none;' }, [
+    el('label', { class: 'dmh-label', for: 'claimant-vault-id' }, 'Vault ID (exact lookup)'),
     vaultIdInput,
     el('div', { class: 'dmh-hint' }, 'Use this if an address maps to multiple vaults, or if address lookup found nothing.'),
   ]);
   advancedToggle.addEventListener('click', () => {
     advancedOpen = !advancedOpen;
     advancedSection.style.display = advancedOpen ? 'flex' : 'none';
+    advancedToggle.setAttribute('aria-expanded', String(advancedOpen));
     advancedToggle.textContent = advancedOpen ? 'Hide vault ID lookup' : 'Use vault ID instead (advanced)';
+    if (advancedOpen) vaultIdInput.focus();
   });
 
-  const searchBtn = el('button', { class: 'dmh-btn dmh-btn-primary' }, 'Look up →');
+  const searchBtn = el('button', { class: 'dmh-btn dmh-btn-primary', type: 'submit', form: formId }, 'Look up →');
 
-  searchBtn.addEventListener('click', async () => {
+  async function submitLookup(event) {
+    event.preventDefault();
     errorEl.textContent = '';
+    choicesEl.replaceChildren();
     searchBtn.disabled = true;
     searchBtn.textContent = 'Searching…';
     try {
-      const vaultIdRaw = vaultIdInput.value.trim();
+      const vaultIdRaw = advancedOpen ? vaultIdInput.value.trim() : '';
       const addressRaw = addressInput.value.trim();
 
       if (vaultIdRaw) {
@@ -59,14 +65,41 @@ export function renderStep1Lookup(container, state, onFound) {
       if (vaults.length === 0) {
         throw new Error('No vaults found for this address. Try the exact vault ID instead if you have it.');
       }
-      // If exactly one, go straight to status. If multiple, let the user
-      // pick via a bottom-sheet-style list (kept simple: pick the first
-      // that is expired/claimable, else the first overall).
-      const claimable = vaults.find((v) => v.expired && v.active) || vaults[0];
-      state.vaultId = claimable.vaultId;
-      state.ownerAddress = checksummed;
-      state.status = claimable;
-      onFound(vaults.length > 1 ? vaults : null);
+      if (vaults.length === 1) {
+        state.vaultId = vaults[0].vaultId;
+        state.ownerAddress = checksummed;
+        state.status = vaults[0];
+        onFound();
+        return;
+      }
+
+      const choiceButtons = vaults.map((vault, index) => {
+        let statusText = 'Claimable';
+        if (!vault.active) statusText = 'Deactivated';
+        else if (vault.locked) statusText = `Cooldown: ${formatDuration(vault.cooldownRemaining)}`;
+        else if (!vault.expired) statusText = `Available in ${formatDuration(vault.timeRemaining)}`;
+
+        const button = el('button', {
+          class: 'dmh-card',
+          type: 'button',
+          style: 'width:100%; text-align:left; cursor:pointer;',
+          'aria-label': `Select vault ${index + 1} of ${vaults.length}. ${statusText}`,
+        }, [
+          el('div', { class: 'dmh-card-title' }, `Vault ${index + 1}: ${statusText}`),
+          el('div', { class: 'mono', style: 'font-size:12px; color: var(--dmh-text-muted); word-break:break-all;' }, vault.vaultId),
+        ]);
+        button.addEventListener('click', () => {
+          state.vaultId = vault.vaultId;
+          state.ownerAddress = checksummed;
+          state.status = vault;
+          onFound();
+        });
+        return button;
+      });
+      choicesEl.appendChild(el('div', { class: 'dmh-field', role: 'group', 'aria-labelledby': 'claimant-vault-choices-title' }, [
+        el('h2', { id: 'claimant-vault-choices-title', class: 'dmh-card-title' }, `${vaults.length} vaults found. Choose the exact vault:`),
+        ...choiceButtons,
+      ]));
     } catch (e) {
       if (e instanceof DmhNotDeployedError) {
         errorEl.textContent = e.message;
@@ -77,23 +110,24 @@ export function renderStep1Lookup(container, state, onFound) {
       searchBtn.disabled = false;
       searchBtn.textContent = 'Look up →';
     }
-  });
+  }
+
+  const form = el('form', { id: formId });
+  form.addEventListener('submit', submitLookup);
+  form.appendChild(el('div', { class: 'dmh-main' }, [
+    el('h1', { class: 'dmh-heading' }, 'Find a vault'),
+    el('p', { class: 'dmh-subheading' }, "Enter the former owner's wallet address to check if a vault is claimable."),
+    el('div', { class: 'dmh-field' }, [
+      el('label', { class: 'dmh-label', for: 'claimant-owner-address' }, "Owner's address"),
+      addressInput,
+    ]),
+    advancedToggle,
+    advancedSection,
+    errorEl,
+    choicesEl,
+  ]));
 
   container.appendChild(renderStepIndicator(1, 4));
-  container.appendChild(
-    el('div', { class: 'dmh-main' }, [
-      el('h1', { class: 'dmh-heading' }, 'Find a vault'),
-      el('p', { class: 'dmh-subheading' }, "Enter the former owner's wallet address to check if a vault is claimable."),
-
-      el('div', { class: 'dmh-field' }, [
-        el('label', { class: 'dmh-label' }, "Owner's address"),
-        addressInput,
-      ]),
-
-      advancedToggle,
-      advancedSection,
-      errorEl,
-    ])
-  );
+  container.appendChild(form);
   container.appendChild(renderStickyCta(searchBtn));
 }
