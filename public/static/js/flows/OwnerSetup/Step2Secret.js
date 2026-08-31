@@ -131,8 +131,7 @@ export function renderStep2Secret(container, state, onNext, onBack) {
     autocomplete: 'new-password',
     autocapitalize: 'off',
     spellcheck: 'false',
-    placeholder: 'Generate a recovery secret below',
-    readonly: 'true',
+    placeholder: 'Enter your own strong word or phrase',
   });
   const confirmInput = el('input', {
     id: 'owner-secret-confirm',
@@ -144,7 +143,7 @@ export function renderStep2Secret(container, state, onNext, onBack) {
     placeholder: 'Re-enter the same secret',
   });
 
-  const entropyFeedback = el('div', { class: 'dmh-hint', id: 'owner-secret-strength', role: 'status', 'aria-live': 'polite' }, 'Generate a cryptographically random recovery secret.');
+  const entropyFeedback = el('div', { class: 'dmh-hint', id: 'owner-secret-strength', role: 'status', 'aria-live': 'polite' }, 'Choose a strong secret or generate one for convenience.');
   const matchFeedback = el('div', { class: 'dmh-error-text', id: 'owner-secret-match', role: 'alert', 'aria-live': 'assertive' });
   secretInput.setAttribute('aria-describedby', 'owner-secret-strength');
   confirmInput.setAttribute('aria-describedby', 'owner-secret-match');
@@ -165,7 +164,7 @@ export function renderStep2Secret(container, state, onNext, onBack) {
     toggleShowBtn.setAttribute('aria-pressed', String(showSecret));
   });
 
-  const generateBtn = el('button', { class: 'dmh-btn dmh-btn-secondary', type: 'button' }, 'Generate secure recovery secret');
+  const generateBtn = el('button', { class: 'dmh-btn dmh-btn-secondary', type: 'button' }, 'Generate one for me');
   const backupCheckbox = el('input', { type: 'checkbox', id: 'owner-secret-backed-up' });
   backupCheckbox.addEventListener('change', () => {
     backupConfirmed = backupCheckbox.checked;
@@ -196,7 +195,7 @@ export function renderStep2Secret(container, state, onNext, onBack) {
     entropyResult = checkSecretEntropy(secretValue);
     entropyFeedback.innerHTML = '';
     if (secretValue.length === 0) {
-      entropyFeedback.textContent = 'Generate a cryptographically random recovery secret.';
+      entropyFeedback.textContent = 'Choose a strong secret or generate one for convenience.';
       entropyFeedback.className = 'dmh-hint';
       return;
     }
@@ -280,7 +279,7 @@ export function renderStep2Secret(container, state, onNext, onBack) {
   container.appendChild(
     el('div', { class: 'dmh-main' }, [
        el('h1', { class: 'dmh-heading' }, 'Set your secret & inactivity period'),
-       el('p', { class: 'dmh-subheading' }, 'Your phrase derives an authorization signer locally. It never enters a transaction or browser storage. Anyone with the phrase can authorize a claim after this vault becomes inactive.'),
+       el('p', { class: 'dmh-subheading' }, 'Choose your own strong word or phrase, or let this device generate one. It derives an authorization signer locally and never enters a transaction or browser storage. Anyone with the secret can authorize a claim after this vault becomes inactive.'),
 
       el('div', { class: 'dmh-field' }, [
         el('label', { class: 'dmh-label', for: 'owner-inactivity-count' }, 'Inactivity period — choose any duration'),
@@ -296,9 +295,9 @@ export function renderStep2Secret(container, state, onNext, onBack) {
 
       el('div', { class: 'dmh-field' }, [
         el('label', { class: 'dmh-label', for: 'owner-secret' }, 'Secret phrase'),
-        generateBtn,
         el('div', { class: 'dmh-input-wrap' }, [secretInput, toggleShowBtn]),
         entropyFeedback,
+        generateBtn,
       ]),
 
       el('div', { class: 'dmh-field' }, [
