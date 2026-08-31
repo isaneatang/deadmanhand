@@ -1,563 +1,486 @@
 const { expect } = require('chai');
 const { ethers } = require('hardhat');
-const { time } = require('@nomicfoundation/hardhat-toolbox/network-helpers');
+const { loadFixture, time } = require('@nomicfoundation/hardhat-toolbox/network-helpers');
 
-// Deploy defaults matching the suggested values in Master Prompt Section 11
-// (open product questions — these are the suggested defaults, confirm final
-// numbers with product before mainnet deploy).
-const BASE_FEE = ethers.parseUnits('1', 6); // 1 USDT @ 6 decimals
-const FAILURE_THRESHOLD = 5;
-const COOLDOWN_DURATION = 24 * 60 * 60; // 24h
-const MAX_ESCALATION_DOUBLINGS = 4; // cap growth at 16x base fee
-const INACTIVITY_PERIOD = 30 * 24 * 60 * 60; // 30 days, within min/max bounds
+const BASE_FEE = ethers.parseUnits('1', 6);
+const INACTIVITY_PERIOD = 60;
+const KDF_VERSION = 1;
+const SALT = ethers.keccak256(ethers.toUtf8Bytes('memory-hard-kdf-salt'));
+const CLAIM_TYPES = {
+  Claim: [
+    { name: 'vaultId', type: 'bytes32' },
+    { name: 'recipient', type: 'address' },
+    { name: 'feePayer', type: 'address' },
+    { name: 'nonce', type: 'uint256' },
+    { name: 'deadline', type: 'uint256' },
+    { name: 'maxFee', type: 'uint256' },
+  ],
+};
 
-function computeVaultId(seedString) {
-  return ethers.keccak256(ethers.toUtf8Bytes(seedString));
-}
-
-function computeSecretHash(secretPlaintext, ownerAddress, vaultId) {
-  return ethers.keccak256(
-    ethers.solidityPacked(['string', 'address', 'bytes32'], [secretPlaintext, ownerAddress, vaultId])
-  );
+function vaultId(label) {
+  return ethers.keccak256(ethers.toUtf8Bytes(label));
 }
 
 async function deployFixture() {
-  const [deployer, owner, claimant, other, feeRecipient] = await ethers.getSigners();
-
+  const [deployer, owner, authorizationSigner, claimant, recipient, other, feeRecipient] =
+    await ethers.getSigners();
   const MockERC20 = await ethers.getContractFactory('MockERC20');
-  const usdt = await MockERC20.deploy('Tether USD', 'USDT', 6);
-  await usdt.waitForDeployment();
-
+  const feeToken = await MockERC20.deploy('Fee USD', 'FUSD', 6);
   const DeadMansHand = await ethers.getContractFactory('DeadMansHand');
-  const dmh = await DeadMansHand.deploy(
-    await usdt.getAddress(),
-    BASE_FEE,
-    FAILURE_THRESHOLD,
-    COOLDOWN_DURATION,
-    MAX_ESCALATION_DOUBLINGS,
-    feeRecipient.address
-  );
-  await dmh.waitForDeployment();
+  const dmh = await DeadMansHand.deploy(await feeToken.getAddress(), BASE_FEE, feeRecipient.address);
 
-  // Fund claimant with plenty of USDT for many fee-escalated attempts, and
-  // approve the DMH contract to pull fees.
-  await usdt.mint(claimant.address, ethers.parseUnits('1000000', 6));
-  await usdt.connect(claimant).approve(await dmh.getAddress(), ethers.MaxUint256);
+  for (const payer of [claimant, other]) {
+    await feeToken.mint(payer.address, BASE_FEE * 100n);
+    await feeToken.connect(payer).approve(await dmh.getAddress(), ethers.MaxUint256);
+  }
 
-  await usdt.mint(other.address, ethers.parseUnits('1000000', 6));
-  await usdt.connect(other).approve(await dmh.getAddress(), ethers.MaxUint256);
-
-  return { deployer, owner, claimant, other, feeRecipient, usdt, dmh };
+  return {
+    deployer,
+    owner,
+    authorizationSigner,
+    claimant,
+    recipient,
+    other,
+    feeRecipient,
+    feeToken,
+    dmh,
+  };
 }
 
-describe('DeadMansHand', function () {
-  describe('createVault', function () {
-    it('creates a vault with correct fields and emits VaultCreated', async function () {
-      const { owner, dmh } = await deployFixture();
-      const vaultId = computeVaultId('vault-1');
-      const secretHash = computeSecretHash('correct horse battery staple 42!', owner.address, vaultId);
+async function createVault(ctx, id = vaultId('default'), signer = ctx.authorizationSigner) {
+  await ctx.dmh
+    .connect(ctx.owner)
+    .createVault(id, signer.address, SALT, KDF_VERSION, INACTIVITY_PERIOD);
+  return id;
+}
 
-      await expect(dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD))
-        .to.emit(dmh, 'VaultCreated')
-        .withArgs(vaultId, owner.address, INACTIVITY_PERIOD);
+async function makeClaim(ctx, overrides = {}, contract = ctx.dmh) {
+  const now = await time.latest();
+  const authorization = {
+    vaultId: overrides.vaultId ?? vaultId('default'),
+    recipient: overrides.recipient ?? ctx.recipient.address,
+    feePayer: overrides.feePayer ?? ctx.claimant.address,
+    nonce: overrides.nonce ?? 0,
+    deadline: overrides.deadline ?? now + 3600,
+    maxFee: overrides.maxFee ?? BASE_FEE,
+  };
+  const network = await ethers.provider.getNetwork();
+  const domain = {
+    name: 'DeadMansHand',
+    version: '2',
+    chainId: network.chainId,
+    verifyingContract: await contract.getAddress(),
+  };
+  const signature = await ctx.authorizationSigner.signTypedData(domain, CLAIM_TYPES, authorization);
+  return { authorization, signature };
+}
 
-      const vaultIds = await dmh.getOwnerVaults(owner.address);
-      expect(vaultIds).to.deep.equal([vaultId]);
+async function expire() {
+  await time.increase(INACTIVITY_PERIOD + 1);
+}
+
+describe('DeadMansHand v2', function () {
+  describe('creation and owner controls', function () {
+    it('stores all v2 vault fields and indexes the owner', async function () {
+      const ctx = await loadFixture(deployFixture);
+      const id = vaultId('fields');
+
+      await expect(
+        ctx.dmh
+          .connect(ctx.owner)
+          .createVault(id, ctx.authorizationSigner.address, SALT, KDF_VERSION, INACTIVITY_PERIOD)
+      )
+        .to.emit(ctx.dmh, 'VaultCreated')
+        .withArgs(
+          id,
+          ctx.owner.address,
+          ctx.authorizationSigner.address,
+          SALT,
+          KDF_VERSION,
+          INACTIVITY_PERIOD
+        );
+
+      const stored = await ctx.dmh.vaults(id);
+      expect(stored.owner).to.equal(ctx.owner.address);
+      expect(stored.authorizationSigner).to.equal(ctx.authorizationSigner.address);
+      expect(stored.kdfSalt).to.equal(SALT);
+      expect(stored.kdfVersion).to.equal(KDF_VERSION);
+      expect(stored.inactivityPeriod).to.equal(INACTIVITY_PERIOD);
+      expect(stored.active).to.equal(true);
+      expect(stored.claimed).to.equal(false);
+      expect(stored.exists).to.equal(true);
+      expect(stored.claimNonce).to.equal(0);
+      expect(await ctx.dmh.getOwnerVaults(ctx.owner.address)).to.deep.equal([id]);
+      expect(await ctx.dmh.KDF_VERSION()).to.equal(1);
     });
 
-    it('reverts on duplicate vaultId', async function () {
-      const { owner, dmh } = await deployFixture();
-      const vaultId = computeVaultId('dup');
-      const secretHash = computeSecretHash('secret-one', owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
+    it('rejects duplicate IDs, zero signer/salt, unsupported KDF, and invalid periods', async function () {
+      const ctx = await loadFixture(deployFixture);
+      const id = vaultId('validation');
+      const create = (signer, salt, version, period) =>
+        ctx.dmh.connect(ctx.owner).createVault(id, signer, salt, version, period);
+      const simulateCreate = (signer, salt, version, period) =>
+        ctx.dmh.connect(ctx.owner).createVault.staticCall(id, signer, salt, version, period);
 
-      await expect(
-        dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD)
-      ).to.be.revertedWithCustomError(dmh, 'VaultAlreadyExists');
+      await expect(simulateCreate(ethers.ZeroAddress, SALT, 1, 60)).to.be.revertedWithCustomError(
+        ctx.dmh,
+        'InvalidAuthorizationSigner'
+      );
+      await expect(simulateCreate(ctx.authorizationSigner.address, ethers.ZeroHash, 1, 60)).to.be.revertedWithCustomError(
+        ctx.dmh,
+        'InvalidKdfSalt'
+      );
+      await expect(simulateCreate(ctx.authorizationSigner.address, SALT, 2, 60)).to.be.revertedWithCustomError(
+        ctx.dmh,
+        'UnsupportedKdfVersion'
+      );
+      await expect(simulateCreate(ctx.authorizationSigner.address, SALT, 1, 59)).to.be.revertedWithCustomError(
+        ctx.dmh,
+        'InvalidInactivityPeriod'
+      );
+      await expect(simulateCreate(ctx.authorizationSigner.address, SALT, 1, 10 * 365 * 86400 + 1)).to.be.revertedWithCustomError(
+        ctx.dmh,
+        'InvalidInactivityPeriod'
+      );
+      await create(ctx.authorizationSigner.address, SALT, 1, 60);
+      await expect(simulateCreate(ctx.authorizationSigner.address, SALT, 1, 60)).to.be.revertedWithCustomError(
+        ctx.dmh,
+        'VaultAlreadyExists'
+      );
     });
 
-    it('rejects inactivity period outside allowed bounds', async function () {
-      const { owner, dmh } = await deployFixture();
-      const vaultId = computeVaultId('bounds');
-      const secretHash = computeSecretHash('x', owner.address, vaultId);
+    it('restricts administration to the owner and makes deactivation one-way', async function () {
+      const ctx = await loadFixture(deployFixture);
+      const id = await createVault(ctx);
 
+      await expect(ctx.dmh.connect(ctx.other).ping.staticCall(id)).to.be.revertedWithCustomError(ctx.dmh, 'NotVaultOwner');
       await expect(
-        dmh.connect(owner).createVault(vaultId, secretHash, 0)
-      ).to.be.revertedWithCustomError(dmh, 'InvalidInactivityPeriod');
-
-      await expect(
-        dmh.connect(owner).createVault(vaultId, secretHash, 100 * 365 * 24 * 60 * 60)
-      ).to.be.revertedWithCustomError(dmh, 'InvalidInactivityPeriod');
-    });
-
-    it('allows the vault creator to pick any custom inactivity duration, including very short ones (1 minute minimum, not months)', async function () {
-      const { owner, claimant, dmh } = await deployFixture();
-      const vaultId = computeVaultId('short-duration');
-      const secret = 'quick-test-secret-XYZ789';
-      const secretHash = computeSecretHash(secret, owner.address, vaultId);
-
-      // 30 seconds is below the 1-minute floor — must be rejected.
-      await expect(
-        dmh.connect(owner).createVault(vaultId, secretHash, 30)
-      ).to.be.revertedWithCustomError(dmh, 'InvalidInactivityPeriod');
-
-      // Exactly 1 minute is the floor — must be accepted, and the vault
-      // must actually become claimable after just 1 minute of inactivity
-      // (proving this isn't secretly clamped to a longer minimum anywhere
-      // else in the contract).
-      await dmh.connect(owner).createVault(vaultId, secretHash, 60);
-      let status = await dmh.getStatus(vaultId);
-      expect(status.expired).to.equal(false);
-
-      await time.increase(61);
-      status = await dmh.getStatus(vaultId);
-      expect(status.expired).to.equal(true);
-
-      await expect(dmh.connect(claimant).attemptUnlock(vaultId, secret))
-        .to.emit(dmh, 'UnlockAttempted')
-        .withArgs(vaultId, claimant.address, true);
-    });
-  });
-
-  describe('addToken / ping / deactivateVault access control', function () {
-    it('only the vault owner can add tokens, ping, or deactivate', async function () {
-      const { owner, other, dmh, usdt } = await deployFixture();
-      const vaultId = computeVaultId('access');
-      const secretHash = computeSecretHash('s', owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
-
-      await expect(
-        dmh.connect(other).addToken(vaultId, await usdt.getAddress(), false)
-      ).to.be.revertedWithCustomError(dmh, 'NotVaultOwner');
-
-      await expect(dmh.connect(other).ping(vaultId)).to.be.revertedWithCustomError(dmh, 'NotVaultOwner');
-
-      await expect(dmh.connect(other).deactivateVault(vaultId)).to.be.revertedWithCustomError(
-        dmh,
+        ctx.dmh.connect(ctx.other).addToken.staticCall(id, await ctx.feeToken.getAddress(), false)
+      ).to.be.revertedWithCustomError(ctx.dmh, 'NotVaultOwner');
+      await expect(ctx.dmh.connect(ctx.other).deactivateVault.staticCall(id)).to.be.revertedWithCustomError(
+        ctx.dmh,
         'NotVaultOwner'
       );
 
-      // Owner succeeds
-      await expect(dmh.connect(owner).addToken(vaultId, await usdt.getAddress(), false)).to.emit(
-        dmh,
-        'TokenAdded'
+      await ctx.dmh.connect(ctx.owner).deactivateVault(id);
+      await expect(ctx.dmh.connect(ctx.owner).ping.staticCall(id)).to.be.revertedWithCustomError(ctx.dmh, 'VaultInactive');
+      await expect(
+        ctx.dmh.connect(ctx.owner).addToken.staticCall(id, await ctx.feeToken.getAddress(), false)
+      ).to.be.revertedWithCustomError(ctx.dmh, 'VaultInactive');
+      await expect(ctx.dmh.connect(ctx.owner).deactivateVault.staticCall(id)).to.be.revertedWithCustomError(
+        ctx.dmh,
+        'VaultInactive'
       );
-      await expect(dmh.connect(owner).ping(vaultId)).to.emit(dmh, 'Pinged');
     });
 
-    it('rejects duplicate token registration and enforces MAX_TOKENS_PER_VAULT', async function () {
-      const { owner, dmh, usdt } = await deployFixture();
-      const vaultId = computeVaultId('dup-token');
-      const secretHash = computeSecretHash('s', owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
+    it('resets expiry on ping and keeps compatible unlocked status fields', async function () {
+      const ctx = await loadFixture(deployFixture);
+      const id = await createVault(ctx);
+      await time.increase(50);
+      await ctx.dmh.connect(ctx.owner).ping(id);
 
-      await dmh.connect(owner).addToken(vaultId, await usdt.getAddress(), false);
-      await expect(
-        dmh.connect(owner).addToken(vaultId, await usdt.getAddress(), false)
-      ).to.be.revertedWithCustomError(dmh, 'TokenAlreadyRegistered');
-    });
-
-    it('deactivateVault gates only owner-admin, not the secret; deactivated vault cannot be claimed', async function () {
-      const { owner, claimant, dmh, usdt } = await deployFixture();
-      const secret = 'super-entropy-secret-999!!';
-      const vaultId = computeVaultId('deactivate');
-      const secretHash = computeSecretHash(secret, owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
-      await dmh.connect(owner).deactivateVault(vaultId);
-
-      await time.increase(INACTIVITY_PERIOD + 1);
-
-      await expect(
-        dmh.connect(claimant).attemptUnlock(vaultId, secret)
-      ).to.be.revertedWithCustomError(dmh, 'VaultInactive');
-    });
-  });
-
-  describe('getStatus', function () {
-    it('reports not expired before inactivity period elapses, expired after', async function () {
-      const { owner, dmh } = await deployFixture();
-      const vaultId = computeVaultId('status');
-      const secretHash = computeSecretHash('s', owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
-
-      let status = await dmh.getStatus(vaultId);
+      let status = await ctx.dmh.getStatus(id);
       expect(status.expired).to.equal(false);
-      expect(status.timeRemaining).to.be.closeTo(BigInt(INACTIVITY_PERIOD), 5n);
-
-      await time.increase(INACTIVITY_PERIOD + 1);
-      status = await dmh.getStatus(vaultId);
-      expect(status.expired).to.equal(true);
-      expect(status.timeRemaining).to.equal(0n);
-    });
-
-    it('ping resets the inactivity clock', async function () {
-      const { owner, dmh } = await deployFixture();
-      const vaultId = computeVaultId('ping-reset');
-      const secretHash = computeSecretHash('s', owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
-
-      await time.increase(INACTIVITY_PERIOD - 100);
-      await dmh.connect(owner).ping(vaultId);
-
-      const status = await dmh.getStatus(vaultId);
-      expect(status.expired).to.equal(false);
-      expect(status.timeRemaining).to.be.closeTo(BigInt(INACTIVITY_PERIOD), 5n);
-    });
-  });
-
-  describe('attemptUnlock — expiry gating', function () {
-    it('reverts NotExpiredYet if attempted before the inactivity deadline', async function () {
-      const { owner, claimant, dmh } = await deployFixture();
-      const secret = 'entropy-secret-abcdEFGH123';
-      const vaultId = computeVaultId('too-early');
-      const secretHash = computeSecretHash(secret, owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
-
-      await expect(
-        dmh.connect(claimant).attemptUnlock(vaultId, secret)
-      ).to.be.revertedWithCustomError(dmh, 'NotExpiredYet');
-    });
-  });
-
-  describe('attemptUnlock — fee collection', function () {
-    it('charges the base fee on the first attempt regardless of match/mismatch', async function () {
-      const { owner, claimant, dmh, usdt } = await deployFixture();
-      const secret = 'entropy-secret-abcdEFGH123';
-      const vaultId = computeVaultId('fee-mismatch');
-      const secretHash = computeSecretHash(secret, owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
-      await time.increase(INACTIVITY_PERIOD + 1);
-
-      const balBefore = await usdt.balanceOf(claimant.address);
-      await dmh.connect(claimant).attemptUnlock(vaultId, 'wrong-guess');
-      const balAfter = await usdt.balanceOf(claimant.address);
-
-      expect(balBefore - balAfter).to.equal(BASE_FEE);
-    });
-
-    it('forwards the fee directly to feeRecipient — never held by the contract itself', async function () {
-      const { owner, claimant, feeRecipient, dmh, usdt } = await deployFixture();
-      const secret = 'entropy-secret-abcdEFGH123';
-      const vaultId = computeVaultId('fee-recipient');
-      const secretHash = computeSecretHash(secret, owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
-      await time.increase(INACTIVITY_PERIOD + 1);
-
-      const recipientBalBefore = await usdt.balanceOf(feeRecipient.address);
-      const contractBalBefore = await usdt.balanceOf(await dmh.getAddress());
-
-      await expect(dmh.connect(claimant).attemptUnlock(vaultId, 'wrong-guess'))
-        .to.emit(usdt, 'Transfer')
-        .withArgs(claimant.address, feeRecipient.address, BASE_FEE);
-
-      const recipientBalAfter = await usdt.balanceOf(feeRecipient.address);
-      const contractBalAfter = await usdt.balanceOf(await dmh.getAddress());
-
-      expect(recipientBalAfter - recipientBalBefore).to.equal(BASE_FEE);
-      expect(contractBalAfter).to.equal(contractBalBefore); // contract never holds the fee, even transiently in storage
-      expect(await dmh.feeRecipient()).to.equal(feeRecipient.address);
-    });
-
-    it('reverts FeeTransferFailed if claimant has insufficient allowance', async function () {
-      const { owner, claimant, dmh, usdt } = await deployFixture();
-      const secret = 'entropy-secret-abcdEFGH123';
-      const vaultId = computeVaultId('fee-fail');
-      const secretHash = computeSecretHash(secret, owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
-      await time.increase(INACTIVITY_PERIOD + 1);
-
-      // Revoke claimant's allowance.
-      await usdt.connect(claimant).approve(await dmh.getAddress(), 0);
-
-      await expect(dmh.connect(claimant).attemptUnlock(vaultId, 'wrong-guess')).to.be.reverted;
-    });
-  });
-
-  describe('attemptUnlock — mismatch / lockout / fee escalation (core security logic)', function () {
-    it('increments failedAttempts on each mismatch and never touches secretHash', async function () {
-      const { owner, claimant, dmh } = await deployFixture();
-      const secret = 'entropy-secret-abcdEFGH123';
-      const vaultId = computeVaultId('mismatch-count');
-      const secretHash = computeSecretHash(secret, owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
-      await time.increase(INACTIVITY_PERIOD + 1);
-
-      expect(await dmh.getFailedAttempts(vaultId)).to.equal(0);
-      await dmh.connect(claimant).attemptUnlock(vaultId, 'nope-1');
-      expect(await dmh.getFailedAttempts(vaultId)).to.equal(1);
-      await dmh.connect(claimant).attemptUnlock(vaultId, 'nope-2');
-      expect(await dmh.getFailedAttempts(vaultId)).to.equal(2);
-    });
-
-    it('escalates the fee by doubling on each successive mismatch up to the cap', async function () {
-      const { owner, claimant, dmh, usdt } = await deployFixture();
-      const secret = 'entropy-secret-abcdEFGH123';
-      const vaultId = computeVaultId('fee-escalation');
-      const secretHash = computeSecretHash(secret, owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
-      await time.increase(INACTIVITY_PERIOD + 1);
-
-      // previewFee should read 1x, 2x, 4x, 8x, 16x (cap at 2^MAX_ESCALATION_DOUBLINGS=4)
-      const expectedMultipliers = [1, 2, 4, 8, 16];
-      for (let i = 0; i < expectedMultipliers.length; i++) {
-        const expectedFee = BASE_FEE * BigInt(expectedMultipliers[i]);
-        expect(await dmh.previewFee(vaultId)).to.equal(expectedFee);
-
-        const balBefore = await usdt.balanceOf(claimant.address);
-        await dmh.connect(claimant).attemptUnlock(vaultId, `wrong-${i}`);
-        const balAfter = await usdt.balanceOf(claimant.address);
-        expect(balBefore - balAfter).to.equal(expectedFee);
-      }
-
-      // Vault should now be locked (5 failures reached threshold); the fee
-      // stays capped at 16x for any further preview even though this call
-      // itself will revert once locked.
-      expect(await dmh.previewFee(vaultId)).to.equal(BASE_FEE * 16n);
-    });
-
-    it('enters cooldown exactly at failureThreshold and rejects further attempts until it elapses', async function () {
-      const { owner, claimant, dmh } = await deployFixture();
-      const secret = 'entropy-secret-abcdEFGH123';
-      const vaultId = computeVaultId('cooldown');
-      const secretHash = computeSecretHash(secret, owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
-      await time.increase(INACTIVITY_PERIOD + 1);
-
-      for (let i = 0; i < FAILURE_THRESHOLD; i++) {
-        await dmh.connect(claimant).attemptUnlock(vaultId, `wrong-${i}`);
-      }
-
-      let status = await dmh.getStatus(vaultId);
-      expect(status.locked).to.equal(true);
-      expect(status.cooldownRemaining).to.be.closeTo(BigInt(COOLDOWN_DURATION), 5n);
-
-      // Any further attempt during cooldown reverts with VaultLockedError,
-      // and crucially does NOT consume/charge a fee.
-      await expect(dmh.connect(claimant).attemptUnlock(vaultId, secret)).to.be.revertedWithCustomError(
-        dmh,
-        'VaultLockedError'
-      );
-
-      // Fast-forward past cooldown — attempts should work again and the
-      // failure counter + fee multiplier reset.
-      await time.increase(COOLDOWN_DURATION + 1);
-      status = await dmh.getStatus(vaultId);
+      expect(status.timeRemaining).to.be.closeTo(60n, 2n);
+      expect(status.active).to.equal(true);
       expect(status.locked).to.equal(false);
+      expect(status.cooldownRemaining).to.equal(0);
+      expect(await ctx.dmh.previewFee(id)).to.equal(BASE_FEE);
 
-      expect(await dmh.previewFee(vaultId)).to.equal(BASE_FEE); // back to 1x
-    });
-
-    it('NEVER permanently locks a vault — cooldown always eventually expires (no DoS vector)', async function () {
-      const { owner, claimant, dmh } = await deployFixture();
-      const secret = 'entropy-secret-abcdEFGH123';
-      const vaultId = computeVaultId('no-permalock');
-      const secretHash = computeSecretHash(secret, owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
-      await time.increase(INACTIVITY_PERIOD + 1);
-
-      // Trigger several lockout cycles in a row with wrong guesses.
-      for (let cycle = 0; cycle < 3; cycle++) {
-        for (let i = 0; i < FAILURE_THRESHOLD; i++) {
-          await dmh.connect(claimant).attemptUnlock(vaultId, `wrong-cycle${cycle}-${i}`);
-        }
-        let status = await dmh.getStatus(vaultId);
-        expect(status.locked).to.equal(true);
-        await time.increase(COOLDOWN_DURATION + 1);
-        status = await dmh.getStatus(vaultId);
-        expect(status.locked).to.equal(false);
-      }
-
-      // The legitimate claimant can still succeed with the correct secret
-      // after all that — proving no permanent lock is possible.
-      const success = await dmh.connect(claimant).attemptUnlock(vaultId, secret);
-      await expect(success).to.emit(dmh, 'UnlockAttempted').withArgs(vaultId, claimant.address, true);
-    });
-
-    it('a successful unlock resets failedAttempts and any cooldown', async function () {
-      const { owner, claimant, dmh } = await deployFixture();
-      const secret = 'entropy-secret-abcdEFGH123';
-      const vaultId = computeVaultId('reset-on-success');
-      const secretHash = computeSecretHash(secret, owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
-      await time.increase(INACTIVITY_PERIOD + 1);
-
-      await dmh.connect(claimant).attemptUnlock(vaultId, 'wrong-1');
-      await dmh.connect(claimant).attemptUnlock(vaultId, 'wrong-2');
-      expect(await dmh.getFailedAttempts(vaultId)).to.equal(2);
-
-      await dmh.connect(claimant).attemptUnlock(vaultId, secret);
-      expect(await dmh.getFailedAttempts(vaultId)).to.equal(0);
-      expect(await dmh.previewFee(vaultId)).to.equal(BASE_FEE);
+      await expire();
+      status = await ctx.dmh.getStatus(id);
+      expect(status.expired).to.equal(true);
+      expect(status.timeRemaining).to.equal(0);
     });
   });
 
-  describe('attemptUnlock — skip-and-continue partial claim (core security logic)', function () {
-    it('sweeps a normal ERC20 to the claimant on match', async function () {
-      const { owner, claimant, dmh } = await deployFixture();
-      const secret = 'entropy-secret-abcdEFGH123';
-      const vaultId = computeVaultId('sweep-erc20');
-      const secretHash = computeSecretHash(secret, owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
-
+  describe('EIP-712 authorization', function () {
+    it('claims an expired vault, charges the distinct fee payer, and pays the signed recipient', async function () {
+      const ctx = await loadFixture(deployFixture);
+      const id = await createVault(ctx);
       const MockERC20 = await ethers.getContractFactory('MockERC20');
-      const rewardToken = await MockERC20.deploy('Reward', 'RWD', 18);
-      await rewardToken.waitForDeployment();
-      await rewardToken.mint(owner.address, ethers.parseEther('500'));
-      await rewardToken.connect(owner).approve(await dmh.getAddress(), ethers.MaxUint256);
-      await dmh.connect(owner).addToken(vaultId, await rewardToken.getAddress(), false);
+      const asset = await MockERC20.deploy('Asset', 'AST', 18);
+      await asset.mint(ctx.owner.address, 123n);
+      await asset.connect(ctx.owner).approve(await ctx.dmh.getAddress(), 123n);
+      await ctx.dmh.connect(ctx.owner).addToken(id, await asset.getAddress(), false);
+      await expire();
+      const signed = await makeClaim(ctx);
 
-      await time.increase(INACTIVITY_PERIOD + 1);
-      await dmh.connect(claimant).attemptUnlock(vaultId, secret);
+      const payerBefore = await ctx.feeToken.balanceOf(ctx.claimant.address);
+      await (await ctx.dmh.connect(ctx.claimant).claim(signed.authorization, signed.signature)).wait();
 
-      expect(await rewardToken.balanceOf(claimant.address)).to.equal(ethers.parseEther('500'));
-      expect(await rewardToken.balanceOf(owner.address)).to.equal(0);
+      expect(await ctx.feeToken.balanceOf(ctx.claimant.address)).to.equal(payerBefore - BASE_FEE);
+      expect(await ctx.feeToken.balanceOf(ctx.feeRecipient.address)).to.equal(BASE_FEE);
+      expect(await asset.balanceOf(ctx.recipient.address)).to.equal(123);
+      expect(await asset.balanceOf(ctx.claimant.address)).to.equal(0);
+      const stored = await ctx.dmh.vaults(id);
+      expect(stored.active).to.equal(false);
+      expect(stored.claimed).to.equal(true);
+      expect(stored.claimNonce).to.equal(1);
     });
 
-    it('skips a token with a stale/failing approval and still sweeps the rest — one failure does not revert the claim', async function () {
-      const { owner, claimant, dmh } = await deployFixture();
-      const secret = 'entropy-secret-abcdEFGH123';
-      const vaultId = computeVaultId('skip-and-continue');
-      const secretHash = computeSecretHash(secret, owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
-
-      const MockERC20 = await ethers.getContractFactory('MockERC20');
-      const goodToken = await MockERC20.deploy('Good', 'GOOD', 18);
-      await goodToken.waitForDeployment();
-      await goodToken.mint(owner.address, ethers.parseEther('100'));
-      await goodToken.connect(owner).approve(await dmh.getAddress(), ethers.MaxUint256);
-
-      const MockFailingERC20 = await ethers.getContractFactory('MockFailingERC20');
-      const failToken = await MockFailingERC20.deploy();
-      await failToken.waitForDeployment();
-      await failToken.mint(owner.address, ethers.parseEther('999'));
-      await failToken.connect(owner).approve(await dmh.getAddress(), ethers.MaxUint256);
-      await failToken.setShouldFail(true); // simulate stale approval: owner moved funds elsewhere
-
-      // Register the failing token FIRST to prove it doesn't block the good one after it.
-      await dmh.connect(owner).addToken(vaultId, await failToken.getAddress(), false);
-      await dmh.connect(owner).addToken(vaultId, await goodToken.getAddress(), false);
-
-      await time.increase(INACTIVITY_PERIOD + 1);
-
-      const tx = await dmh.connect(claimant).attemptUnlock(vaultId, secret);
-      await expect(tx).to.emit(dmh, 'TokenTransferFailed');
-      await expect(tx).to.emit(dmh, 'TokenTransferSucceeded');
-
-      // The claim as a whole succeeded (not reverted) and the good token
-      // was fully transferred despite the earlier failure.
-      expect(await goodToken.balanceOf(claimant.address)).to.equal(ethers.parseEther('100'));
-      expect(await failToken.balanceOf(owner.address)).to.equal(ethers.parseEther('999')); // untouched
+    it('rejects pre-expiry claims without charging a fee', async function () {
+      const ctx = await loadFixture(deployFixture);
+      await createVault(ctx);
+      const signed = await makeClaim(ctx);
+      const before = await ctx.feeToken.balanceOf(ctx.claimant.address);
+      await expect(ctx.dmh.connect(ctx.claimant).claim.staticCall(signed.authorization, signed.signature)).to.be.revertedWithCustomError(
+        ctx.dmh,
+        'NotExpiredYet'
+      );
+      expect(await ctx.feeToken.balanceOf(ctx.claimant.address)).to.equal(before);
     });
 
-    it('skips a zero-allowance token registration cleanly (owner approved then revoked)', async function () {
-      const { owner, claimant, dmh } = await deployFixture();
-      const secret = 'entropy-secret-abcdEFGH123';
-      const vaultId = computeVaultId('zero-allowance');
-      const secretHash = computeSecretHash(secret, owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
+    it('binds recipient, fee payer, nonce, deadline, and max fee before charging', async function () {
+      const ctx = await loadFixture(deployFixture);
+      await createVault(ctx);
+      await expire();
+      const valid = await makeClaim(ctx);
+      const payerBefore = await ctx.feeToken.balanceOf(ctx.claimant.address);
 
-      const MockERC20 = await ethers.getContractFactory('MockERC20');
-      const token = await MockERC20.deploy('Revoked', 'REV', 18);
-      await token.waitForDeployment();
-      await token.mint(owner.address, ethers.parseEther('10'));
-      // Never approved (or revoked) — allowance is 0.
-      await dmh.connect(owner).addToken(vaultId, await token.getAddress(), false);
+      await expect(
+        ctx.dmh.connect(ctx.other).claim.staticCall(valid.authorization, valid.signature)
+      ).to.be.revertedWithCustomError(ctx.dmh, 'InvalidFeePayer');
+      await expect(
+        ctx.dmh.connect(ctx.claimant).claim.staticCall({ ...valid.authorization, recipient: ethers.ZeroAddress }, valid.signature)
+      ).to.be.revertedWithCustomError(ctx.dmh, 'InvalidRecipient');
+      await expect(
+        ctx.dmh.connect(ctx.claimant).claim.staticCall({ ...valid.authorization, recipient: ctx.other.address }, valid.signature)
+      ).to.be.revertedWithCustomError(ctx.dmh, 'InvalidSignature');
+      await expect(
+        ctx.dmh.connect(ctx.claimant).claim.staticCall({ ...valid.authorization, nonce: 1 }, valid.signature)
+      ).to.be.revertedWithCustomError(ctx.dmh, 'InvalidNonce');
 
-      await time.increase(INACTIVITY_PERIOD + 1);
-      const tx = await dmh.connect(claimant).attemptUnlock(vaultId, secret);
-      await expect(tx).to.emit(dmh, 'TokenTransferFailed');
-      await expect(tx).to.emit(dmh, 'UnlockAttempted').withArgs(vaultId, claimant.address, true);
+      const expiredAuth = await makeClaim(ctx, { deadline: (await time.latest()) - 1 });
+      await expect(
+        ctx.dmh.connect(ctx.claimant).claim.staticCall(expiredAuth.authorization, expiredAuth.signature)
+      ).to.be.revertedWithCustomError(ctx.dmh, 'AuthorizationExpired');
+      const cheapAuth = await makeClaim(ctx, { maxFee: BASE_FEE - 1n });
+      await expect(
+        ctx.dmh.connect(ctx.claimant).claim.staticCall(cheapAuth.authorization, cheapAuth.signature)
+      ).to.be.revertedWithCustomError(ctx.dmh, 'FeeExceedsMaximum');
+
+      const otherPayer = await makeClaim(ctx, { feePayer: ctx.other.address });
+      await expect(
+        ctx.dmh.connect(ctx.claimant).claim.staticCall(otherPayer.authorization, otherPayer.signature)
+      ).to.be.revertedWithCustomError(ctx.dmh, 'InvalidFeePayer');
+      expect(await ctx.feeToken.balanceOf(ctx.claimant.address)).to.equal(payerBefore);
     });
 
-    it('sweeps a full ERC721Enumerable collection to the claimant', async function () {
-      const { owner, claimant, dmh } = await deployFixture();
-      const secret = 'entropy-secret-abcdEFGH123';
-      const vaultId = computeVaultId('sweep-nft');
-      const secretHash = computeSecretHash(secret, owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
+    it('prevents cross-vault and cross-contract replay', async function () {
+      const ctx = await loadFixture(deployFixture);
+      const idA = await createVault(ctx);
+      const idB = vaultId('other-vault');
+      await createVault(ctx, idB);
+      await expire();
+      const signedA = await makeClaim(ctx);
 
+      await expect(
+        ctx.dmh.connect(ctx.claimant).claim.staticCall({ ...signedA.authorization, vaultId: idB }, signedA.signature)
+      ).to.be.revertedWithCustomError(ctx.dmh, 'InvalidSignature');
+
+      const DeadMansHand = await ethers.getContractFactory('DeadMansHand');
+      const second = await DeadMansHand.deploy(
+        await ctx.feeToken.getAddress(),
+        BASE_FEE,
+        ctx.feeRecipient.address
+      );
+      await second
+        .connect(ctx.owner)
+        .createVault(idA, ctx.authorizationSigner.address, SALT, 1, INACTIVITY_PERIOD);
+      await ctx.feeToken.connect(ctx.claimant).approve(await second.getAddress(), BASE_FEE);
+      await expire();
+      await expect(
+        second.connect(ctx.claimant).claim.staticCall(signedA.authorization, signedA.signature)
+      ).to.be.revertedWithCustomError(second, 'InvalidSignature');
+    });
+
+    it('rejects malformed, wrong-signer, and high-s signatures without charging', async function () {
+      const ctx = await loadFixture(deployFixture);
+      await createVault(ctx);
+      await expire();
+      const valid = await makeClaim(ctx);
+      const before = await ctx.feeToken.balanceOf(ctx.claimant.address);
+
+      await expect(ctx.dmh.connect(ctx.claimant).claim.staticCall(valid.authorization, '0x1234')).to.be.revertedWithCustomError(
+        ctx.dmh,
+        'InvalidSignature'
+      );
+      const wrong = await makeClaim({ ...ctx, authorizationSigner: ctx.other });
+      await expect(
+        ctx.dmh.connect(ctx.claimant).claim.staticCall(wrong.authorization, wrong.signature)
+      ).to.be.revertedWithCustomError(ctx.dmh, 'InvalidSignature');
+
+      const parsed = ethers.Signature.from(valid.signature);
+      const curveN = BigInt('0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141');
+      const highS = ethers.concat([
+        parsed.r,
+        ethers.toBeHex(curveN - BigInt(parsed.s), 32),
+        ethers.toBeHex(parsed.v === 27 ? 28 : 27, 1),
+      ]);
+      await expect(
+        ctx.dmh.connect(ctx.claimant).claim.staticCall(valid.authorization, highS)
+      ).to.be.revertedWithCustomError(ctx.dmh, 'InvalidSignature');
+      expect(await ctx.feeToken.balanceOf(ctx.claimant.address)).to.equal(before);
+    });
+
+    it('rejects replay and preserves one-time claimed state even with no assets', async function () {
+      const ctx = await loadFixture(deployFixture);
+      const id = await createVault(ctx);
+      await expire();
+      const signed = await makeClaim(ctx);
+      await ctx.dmh.connect(ctx.claimant).claim(signed.authorization, signed.signature);
+
+      await expect(
+        ctx.dmh.connect(ctx.claimant).claim.staticCall(signed.authorization, signed.signature)
+      ).to.be.revertedWithCustomError(ctx.dmh, 'VaultInactive');
+      await expect(ctx.dmh.previewFee(id)).to.be.revertedWithCustomError(ctx.dmh, 'VaultInactive');
+      const stored = await ctx.dmh.vaults(id);
+      expect(stored.claimed).to.equal(true);
+      expect(stored.claimNonce).to.equal(1);
+    });
+  });
+
+  describe('fees and skip-and-continue sweeping', function () {
+    it('maps a false-returning fee transfer to FeeTransferFailed and rolls back consumption', async function () {
+      const ctx = await loadFixture(deployFixture);
+      const FalseToken = await ethers.getContractFactory('MockFalseERC20');
+      const falseFee = await FalseToken.deploy();
+      await falseFee.mint(ctx.claimant.address, BASE_FEE);
+      await falseFee.connect(ctx.claimant).approve(ctx.claimant.address, BASE_FEE);
+      const DeadMansHand = await ethers.getContractFactory('DeadMansHand');
+      const dmh = await DeadMansHand.deploy(await falseFee.getAddress(), BASE_FEE, ctx.feeRecipient.address);
+      const local = { ...ctx, dmh, feeToken: falseFee };
+      await createVault(local);
+      await expire();
+      const signed = await makeClaim(local);
+
+      await expect(dmh.connect(ctx.claimant).claim.staticCall(signed.authorization, signed.signature)).to.be.revertedWithCustomError(
+        dmh,
+        'FeeTransferFailed'
+      );
+      const stored = await dmh.vaults(vaultId('default'));
+      expect(stored.active).to.equal(true);
+      expect(stored.claimed).to.equal(false);
+      expect(stored.claimNonce).to.equal(0);
+    });
+
+    it('logs failed ERC20s and continues to later assets while consuming the vault', async function () {
+      const ctx = await loadFixture(deployFixture);
+      const id = await createVault(ctx);
+      const Failing = await ethers.getContractFactory('MockFailingERC20');
+      const failing = await Failing.deploy();
+      const MockERC20 = await ethers.getContractFactory('MockERC20');
+      const good = await MockERC20.deploy('Good', 'GOOD', 18);
+      await failing.mint(ctx.owner.address, 50n);
+      await good.mint(ctx.owner.address, 75n);
+      await failing.connect(ctx.owner).approve(await ctx.dmh.getAddress(), 50n);
+      await good.connect(ctx.owner).approve(await ctx.dmh.getAddress(), 75n);
+      await failing.setShouldFail(true);
+      await ctx.dmh.connect(ctx.owner).addToken(id, await failing.getAddress(), false);
+      await ctx.dmh.connect(ctx.owner).addToken(id, await good.getAddress(), false);
+      await expire();
+      const signed = await makeClaim(ctx);
+
+      const tx = await ctx.dmh.connect(ctx.claimant).claim(signed.authorization, signed.signature);
+      await tx.wait();
+      expect(await failing.balanceOf(ctx.owner.address)).to.equal(50);
+      expect(await good.balanceOf(ctx.recipient.address)).to.equal(75);
+      expect((await ctx.dmh.vaults(id)).claimed).to.equal(true);
+    });
+
+    it('supports enumerable index-0 NFT sweeping and continues after a failed collection', async function () {
+      const ctx = await loadFixture(deployFixture);
+      const id = await createVault(ctx);
       const MockERC721 = await ethers.getContractFactory('MockERC721');
-      const nft = await MockERC721.deploy('Collection', 'COL');
-      await nft.waitForDeployment();
-      const id0 = await nft.mint.staticCall(owner.address);
-      await nft.mint(owner.address);
-      await nft.mint(owner.address);
-      await nft.mint(owner.address);
-      await nft.connect(owner).setApprovalForAll(await dmh.getAddress(), true);
-      await dmh.connect(owner).addToken(vaultId, await nft.getAddress(), true);
+      const blocked = await MockERC721.deploy('Blocked', 'BLK');
+      const good = await MockERC721.deploy('Good NFT', 'GNFT');
+      await blocked.mint(ctx.owner.address);
+      for (let i = 0; i < 3; i++) await good.mint(ctx.owner.address);
+      await good.connect(ctx.owner).setApprovalForAll(await ctx.dmh.getAddress(), true);
+      await ctx.dmh.connect(ctx.owner).addToken(id, await blocked.getAddress(), true);
+      await ctx.dmh.connect(ctx.owner).addToken(id, await good.getAddress(), true);
+      await expire();
+      const signed = await makeClaim(ctx);
 
-      await time.increase(INACTIVITY_PERIOD + 1);
-      await dmh.connect(claimant).attemptUnlock(vaultId, secret);
-
-      expect(await nft.balanceOf(owner.address)).to.equal(0);
-      expect(await nft.balanceOf(claimant.address)).to.equal(3);
+      const tx = await ctx.dmh.connect(ctx.claimant).claim(signed.authorization, signed.signature);
+      await tx.wait();
+      expect(await blocked.balanceOf(ctx.owner.address)).to.equal(1);
+      expect(await good.balanceOf(ctx.owner.address)).to.equal(0);
+      expect(await good.balanceOf(ctx.recipient.address)).to.equal(3);
     });
 
-    it('skips a non-enumerable NFT collection gracefully instead of reverting the whole claim', async function () {
-      const { owner, claimant, dmh } = await deployFixture();
-      const secret = 'entropy-secret-abcdEFGH123';
-      const vaultId = computeVaultId('non-enumerable');
-      const secretHash = computeSecretHash(secret, owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
-
-      const MockERC721NonEnumerable = await ethers.getContractFactory('MockERC721NonEnumerable');
-      const nft = await MockERC721NonEnumerable.deploy('NonEnum', 'NE');
-      await nft.waitForDeployment();
-      await nft.mint(owner.address);
-      await nft.connect(owner).setApprovalForAll(await dmh.getAddress(), true);
-      await dmh.connect(owner).addToken(vaultId, await nft.getAddress(), true);
-
-      // Also register a normal ERC20 to prove the rest of the sweep still runs.
+    it('logs and skips non-enumerable NFTs, then sweeps later ERC20s', async function () {
+      const ctx = await loadFixture(deployFixture);
+      const id = await createVault(ctx);
+      const NonEnumerable = await ethers.getContractFactory('MockERC721NonEnumerable');
+      const nft = await NonEnumerable.deploy('Plain NFT', 'PLAIN');
       const MockERC20 = await ethers.getContractFactory('MockERC20');
-      const goodToken = await MockERC20.deploy('Good2', 'GOOD2', 18);
-      await goodToken.waitForDeployment();
-      await goodToken.mint(owner.address, ethers.parseEther('7'));
-      await goodToken.connect(owner).approve(await dmh.getAddress(), ethers.MaxUint256);
-      await dmh.connect(owner).addToken(vaultId, await goodToken.getAddress(), false);
+      const token = await MockERC20.deploy('Later', 'LATER', 18);
+      await nft.mint(ctx.owner.address);
+      await nft.connect(ctx.owner).setApprovalForAll(await ctx.dmh.getAddress(), true);
+      await token.mint(ctx.owner.address, 10n);
+      await token.connect(ctx.owner).approve(await ctx.dmh.getAddress(), 10n);
+      await ctx.dmh.connect(ctx.owner).addToken(id, await nft.getAddress(), true);
+      await ctx.dmh.connect(ctx.owner).addToken(id, await token.getAddress(), false);
+      await expire();
+      const signed = await makeClaim(ctx);
 
-      await time.increase(INACTIVITY_PERIOD + 1);
-      const tx = await dmh.connect(claimant).attemptUnlock(vaultId, secret);
-      await expect(tx).to.emit(dmh, 'TokenTransferFailed');
-
-      expect(await goodToken.balanceOf(claimant.address)).to.equal(ethers.parseEther('7'));
-      expect(await nft.balanceOf(owner.address)).to.equal(1); // untouched, still with owner
+      const tx = await ctx.dmh.connect(ctx.claimant).claim(signed.authorization, signed.signature);
+      await tx.wait();
+      expect(await nft.balanceOf(ctx.owner.address)).to.equal(1);
+      expect(await token.balanceOf(ctx.recipient.address)).to.equal(10);
     });
 
-    it('mismatch never sweeps any tokens', async function () {
-      const { owner, claimant, dmh } = await deployFixture();
-      const secret = 'entropy-secret-abcdEFGH123';
-      const vaultId = computeVaultId('mismatch-no-sweep');
-      const secretHash = computeSecretHash(secret, owner.address, vaultId);
-      await dmh.connect(owner).createVault(vaultId, secretHash, INACTIVITY_PERIOD);
+    it('moves only 20 NFTs, logs the cap, and cannot be replayed for leftovers', async function () {
+      const ctx = await loadFixture(deployFixture);
+      const id = await createVault(ctx);
+      const MockERC721 = await ethers.getContractFactory('MockERC721');
+      const nft = await MockERC721.deploy('Large', 'LARGE');
+      for (let i = 0; i < 21; i++) await nft.mint(ctx.owner.address);
+      await nft.connect(ctx.owner).setApprovalForAll(await ctx.dmh.getAddress(), true);
+      await ctx.dmh.connect(ctx.owner).addToken(id, await nft.getAddress(), true);
+      await expire();
+      const signed = await makeClaim(ctx);
 
-      const MockERC20 = await ethers.getContractFactory('MockERC20');
-      const token = await MockERC20.deploy('Safe', 'SAFE', 18);
-      await token.waitForDeployment();
-      await token.mint(owner.address, ethers.parseEther('42'));
-      await token.connect(owner).approve(await dmh.getAddress(), ethers.MaxUint256);
-      await dmh.connect(owner).addToken(vaultId, await token.getAddress(), false);
-
-      await time.increase(INACTIVITY_PERIOD + 1);
-      await dmh.connect(claimant).attemptUnlock(vaultId, 'totally-wrong-secret');
-
-      expect(await token.balanceOf(owner.address)).to.equal(ethers.parseEther('42'));
-      expect(await token.balanceOf(claimant.address)).to.equal(0);
+      const tx = await ctx.dmh.connect(ctx.claimant).claim(signed.authorization, signed.signature);
+      await tx.wait();
+      expect(await nft.balanceOf(ctx.recipient.address)).to.equal(20);
+      expect(await nft.balanceOf(ctx.owner.address)).to.equal(1);
+      await expect(
+        ctx.dmh.connect(ctx.claimant).claim.staticCall(signed.authorization, signed.signature)
+      ).to.be.revertedWithCustomError(ctx.dmh, 'VaultInactive');
     });
-  });
 
-  describe('hash scheme — salting behavior', function () {
-    it('the same plaintext secret produces different hashes for different owners/vaultIds (no cross-vault dictionary reuse)', async function () {
-      const { owner, other } = await deployFixture();
-      const vaultIdA = computeVaultId('vaultA');
-      const vaultIdB = computeVaultId('vaultB');
-      const secret = 'shared-plaintext-guess';
+    it('sets effects before ERC721 callbacks and blocks reentrant claims', async function () {
+      const ctx = await loadFixture(deployFixture);
+      const id = await createVault(ctx);
+      const MockERC721 = await ethers.getContractFactory('MockERC721');
+      const nft = await MockERC721.deploy('Callback', 'CALL');
+      const Receiver = await ethers.getContractFactory('MockReentrantReceiver');
+      const receiver = await Receiver.deploy();
+      await nft.mint(ctx.owner.address);
+      await nft.connect(ctx.owner).setApprovalForAll(await ctx.dmh.getAddress(), true);
+      await ctx.dmh.connect(ctx.owner).addToken(id, await nft.getAddress(), true);
+      await expire();
 
-      const hashOwnerA = computeSecretHash(secret, owner.address, vaultIdA);
-      const hashOwnerB_sameVault = computeSecretHash(secret, other.address, vaultIdA);
-      const hashOwnerA_diffVault = computeSecretHash(secret, owner.address, vaultIdB);
+      const inner = await makeClaim(ctx, {
+        recipient: await receiver.getAddress(),
+        feePayer: await receiver.getAddress(),
+      });
+      await receiver.configure(
+        await ctx.dmh.getAddress(),
+        ctx.dmh.interface.encodeFunctionData('claim', [inner.authorization, inner.signature])
+      );
+      const outer = await makeClaim(ctx, { recipient: await receiver.getAddress() });
+      await ctx.dmh.connect(ctx.claimant).claim(outer.authorization, outer.signature);
 
-      expect(hashOwnerA).to.not.equal(hashOwnerB_sameVault);
-      expect(hashOwnerA).to.not.equal(hashOwnerA_diffVault);
+      expect(await receiver.attempted()).to.equal(true);
+      expect(await receiver.succeeded()).to.equal(false);
+      expect(await nft.balanceOf(await receiver.getAddress())).to.equal(1);
+      const stored = await ctx.dmh.vaults(id);
+      expect(stored.claimed).to.equal(true);
+      expect(stored.claimNonce).to.equal(1);
     });
   });
 });

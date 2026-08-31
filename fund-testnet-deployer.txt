@@ -1,0 +1,4 @@
+BOT Chain Testnet deployer funding address
+0xdbEe6EDF69FE53cc2E0D7daC2cE10F09be982e35
+
+Fund this address with testnet BOT only. Do not send mainnet assets.

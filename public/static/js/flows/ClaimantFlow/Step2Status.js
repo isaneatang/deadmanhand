@@ -1,6 +1,6 @@
 // flows/ClaimantFlow/Step2Status.js — Step 2: Status view (not-yet-expired countdown, or expired + claim entry)
 import { el, renderBackBar, renderStepIndicator, renderStickyCta, formatDuration, formatAddress } from '../../components/theme/ui.js';
-import { getVaultStatus } from '../../lib/contract.js';
+import { getVaultStatus, getVaultMetadata } from '../../lib/contract.js';
 
 export function renderStep2Status(container, state, onNext, onBack) {
   const body = [];
@@ -33,9 +33,10 @@ export function renderStep2Status(container, state, onNext, onBack) {
       return;
     }
     try {
-      const status = await getVaultStatus(state.vaultId);
+      const [status, vault] = await Promise.all([getVaultStatus(state.vaultId), getVaultMetadata(state.vaultId)]);
       if (disposed) return;
       state.status = status;
+      state.vault = vault;
       renderStatus(status);
     } catch (error) {
       if (!disposed) {
@@ -53,23 +54,25 @@ export function renderStep2Status(container, state, onNext, onBack) {
     transitionTimer = null;
     actionRegion.replaceChildren();
 
+    if (status.claimed) {
+      statusRegion.replaceChildren(el('div', { class: 'dmh-warning-banner' }, 'This vault has already been claimed.'));
+      return;
+    }
     if (!status.active) {
       statusRegion.replaceChildren(el('div', { class: 'dmh-warning-banner danger' }, 'This vault was deactivated by its owner and can never be claimed.'));
       return;
     }
 
-    if (status.locked || !status.expired) {
-      const isCooldown = status.locked;
-      const seconds = Number(isCooldown ? status.cooldownRemaining : status.timeRemaining);
+    if (!status.expired) {
+      const isCooldown = false;
+      const seconds = Number(status.timeRemaining);
       deadline = Date.now() + Math.max(0, seconds) * 1000;
-      deadlineKind = isCooldown ? 'cooldown' : 'expiry';
+      deadlineKind = 'expiry';
       const countdown = el('div', { class: 'dmh-countdown', role: 'timer' });
       statusRegion.replaceChildren(el('div', { class: 'dmh-card' }, [
-        el('div', { class: `dmh-badge ${isCooldown ? 'dmh-badge-danger' : 'dmh-badge-warning'}` }, isCooldown ? 'Locked: cooldown active' : 'Not yet claimable'),
+          el('div', { class: 'dmh-badge dmh-badge-warning' }, 'Not yet claimable'),
         countdown,
-        el('p', { class: 'dmh-hint' }, isCooldown
-          ? 'Too many failed attempts recently. Claiming is disabled until the cooldown ends.'
-          : 'This vault becomes claimable once the inactivity period ends.'),
+        el('p', { class: 'dmh-hint' }, 'This vault becomes claimable once the inactivity period ends.'),
       ]));
 
       const tick = () => {
@@ -79,7 +82,7 @@ export function renderStep2Status(container, state, onNext, onBack) {
         }
         const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
         countdown.textContent = formatDuration(remaining);
-        countdown.setAttribute('aria-label', `${deadlineKind === 'cooldown' ? 'Cooldown' : 'Claim availability'} remaining: ${formatDuration(remaining)}`);
+        countdown.setAttribute('aria-label', `Claim availability remaining: ${formatDuration(remaining)}`);
         if (remaining === 0) {
           clearInterval(transitionTimer);
           countdown.textContent = 'Refreshing status…';
@@ -93,7 +96,7 @@ export function renderStep2Status(container, state, onNext, onBack) {
 
     statusRegion.replaceChildren(el('div', { class: 'dmh-card' }, [
       el('div', { class: 'dmh-badge dmh-badge-success' }, 'Claimable'),
-      el('p', { class: 'dmh-hint' }, 'The inactivity period has elapsed. If you know the secret, you can attempt to claim now. A fee applies whether the secret matches or not.'),
+      el('p', { class: 'dmh-hint' }, 'The inactivity period has elapsed. The fee transfers only after a valid authorization is accepted; a rejected on-chain transaction may still consume network gas.'),
     ]));
     const claimBtn = el('button', { class: 'dmh-btn dmh-btn-primary', type: 'button' }, 'Enter secret to claim →');
     claimBtn.addEventListener('click', async () => {

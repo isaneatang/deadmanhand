@@ -1,190 +1,151 @@
 # Dead Man's Hand (DMH)
 
-A decentralized crypto inheritance / emergency-access protocol on BOT Chain.
-An owner registers assets they already hold (no assets move or get locked up
-front — a per-token `approve`/`setApprovalForAll` from the owner's own EOA is
-all that's granted). If the owner goes inactive past a chosen period, anyone
-who knows the secret can claim the registered assets, paying a flat fee that
-escalates (temporarily) on repeated wrong guesses.
+Dead Man's Hand is an experimental BOT Chain dApp for owner-controlled emergency transfer of explicitly approved ERC-20 tokens and ERC-721 collections after an inactivity period. The owner keeps custody during normal operation. At recovery time, the contract uses the owner's recorded approvals and sends recoverable assets to the recipient authorized by a locally produced EIP-712 signature.
 
-## Current Status: Contract Deployed to Testnet, Frontend Not Yet Deployed
+This README documents the **implemented v2 behavior**. `DMH-Master-Build-Prompt.md` contains the original historical build specification and `DMH-UI-Build-Prompt-v2.md` contains the UI addendum; sections that conflict with v2 are explicitly marked superseded there.
 
-This is an honest status report, not a "done" claim. See the checklist below.
+## Status
 
-| Area | Status |
+| Area | Current status |
 |---|---|
-| Smart contract (`contracts/DeadMansHand.sol`) | Written; test suite included |
-| Contract deployed to testnet | Deployed at `0x6bAc4F39e81955FD1Be3C890bd158aF0D08701af` on BOT Chain Testnet (chain ID 968) |
-| Contract deployed to mainnet | Not deployed; mainnet transactions are unavailable |
-| Frontend (Hono/Vite SPA, all flows) | Rebuilt and source-checked; production build must run on supported Node 20-24 |
-| Production deploy | Not deployed |
-| Real mobile-wallet in-app-browser test | Not completed; MetaMask Mobile remains the minimum acceptance test |
+| Solidity contract | v2 implementation in `contracts/DeadMansHand.sol`; local contract tests are present |
+| Frontend | v2 Hono/Vite vanilla-JS SPA is implemented in `public/static/`; build verification is required |
+| Testnet v2 deployment | Deployed and configured at `0xFa77ceE06328F2D748879e1DB480Ad51Ba856E06` on chain ID 968 |
+| Old testnet deployment | The old v1 address `0x6bAc4F39e81955FD1Be3C890bd158aF0D08701af` is disabled and must not be used |
+| Mainnet deployment | Not deployed; `dmhContractAddress` is `null` |
+| Mobile wallet testing | Real MetaMask Mobile or other wallet in-app-browser testing has not been completed |
+| Production frontend | Not deployed |
+| Audit / production safety | No audit is claimed. This is not represented as production-safe software |
 
-### Open decisions blocking full completion
-
-1. **Deployment target.** The current package is configured for Vercel. Confirm
-   the production account/project before running `npm run deploy`.
-2. **Real mobile wallet test.** The spec explicitly requires testing inside a
-   real mobile wallet's in-app browser (MetaMask mobile at minimum) before
-   this can be considered spec-complete. That can only happen once the app
-   is actually deployed to a reachable URL — it can't be done meaningfully
-   against the sandbox-only dev preview.
-
----
+The testnet v2 deployment was independently read back after deployment: bytecode is present, `feeToken`, `baseFee`, `feeRecipient`, KDF version, and EIP-712 domain match this repository. Blockscout source verification has not yet been completed.
 
 ## Architecture
 
-- **Contract**: `contracts/DeadMansHand.sol` (Solidity 0.8.24, OpenZeppelin
-  5.6.1, `evmVersion: cancun`). Per-token EOA approval model — the contract
-  never custodies assets during normal operation; it only calls
-  `transferFrom` / `safeTransferFrom` at successful-claim time, using
-  allowances the owner granted directly from their own wallet.
-- **Frontend**: Hono + Vite, configured for Vercel and serving a
-  hash-routed (`#/...`) vanilla-JS SPA from `public/static/js/`. No frontend
-  framework — plain DOM manipulation, `ethers.js` v6.13.4 pinned via
-  `esm.sh` CDN as the sole wallet/hashing/contract library.
-- **No off-chain database.** All vault state lives on-chain in the contract.
-  The web application only serves the app shell and static assets; it holds no server-side
-  persistence (no D1/KV/R2 needed for this app).
+- The contract is Solidity 0.8.24 with OpenZeppelin 5.6.1 and EIP-712 domain name `DeadMansHand`, version `2`.
+- The frontend is a hash-routed Hono/Vite SPA using vanilla JavaScript and a locally bundled, exact ethers.js v6.17.0 dependency.
+- There is no off-chain database. Vault state and asset-registration events are on-chain; the frontend is a static app shell and client-side transaction/query code.
+- The owner grants the deployed v2 contract per-token ERC-20 allowances or ERC-721 `setApprovalForAll` approvals. DMH does not custody assets during setup and does not automatically cover unrelated assets acquired later unless the relevant approval/registration covers them.
+- A vault may register at most 50 distinct token contract addresses.
 
-### Contract data model
+## v2 Data Model
+
+The on-chain `Vault` struct is exactly:
 
 ```solidity
 struct Vault {
-  address owner;
-  bytes32 secretHash;       // keccak256(secretPlaintext, ownerAddress, vaultId)
-  uint256 inactivityPeriod; // seconds
-  uint256 lastPing;         // last heartbeat timestamp
-  bool active;              // owner can deactivate permanently
-  uint16 failedAttempts;    // resets on cooldown expiry or successful unlock
-  uint256 cooldownUntil;    // 0 = no active cooldown
-  bool exists;
+    address owner;
+    address authorizationSigner;
+    bytes32 kdfSalt;
+    uint8 kdfVersion;
+    uint256 inactivityPeriod;
+    uint256 lastActive;
+    bool active;
+    bool claimed;
+    bool exists;
+    uint256 claimNonce;
 }
 ```
 
-- The vault creator chooses **any** inactivity duration between 1 minute and
-  10 years (`MIN_INACTIVITY_PERIOD` / `MAX_INACTIVITY_PERIOD` in the
-  contract) — there is no forced multi-month floor. The UI's Step 2 lets you
-  type a number + pick a unit (minutes/hours/days/weeks/months/years), with
-  quick-fill presets as convenience shortcuts only.
-- Each vault has a list of registered token entries (ERC-20 or ERC-721
-  collection address + a flag). Max 50 per vault.
-- Every collected unlock-attempt fee is forwarded **directly** to a fixed
-  `feeRecipient` address set at deploy time — the contract never holds fees
-  itself, so there is nothing to withdraw and nothing that can get stuck.
-- Secret hash is salted by **both** owner address and vaultId
-  (`keccak256(abi.encodePacked(secretPlaintext, ownerAddress, vaultId))`) so
-  the same plaintext secret never produces the same hash across vaults —
-  precomputed dictionary attacks against one vault don't transfer to another.
-- Claim ("unlock attempt") always charges the current fee in the configured
-  fee token, win or lose. On a wrong guess, `failedAttempts` increments and
-  the fee **doubles**, capped at `maxEscalationDoublings`, with a temporary
-  cooldown (`cooldownDuration`) — cooldown always expires on its own
-  (`previewFee`/`getStatus` account for elapsed-but-untouched cooldowns), so
-  there is no permanent lockout / no DoS vector.
-- On a correct guess, the contract sweeps every registered token to the
-  claimant with **skip-and-continue**: if one token's `transferFrom` reverts
-  (stale approval, revoked allowance, non-enumerable NFT collection, etc.)
-  that single token is skipped and logged (`TokenTransferFailed` event) while
-  the rest of the claim proceeds — one bad token never reverts the whole
-  claim.
-- **Known limitation**: ERC-721 collections are registered as a whole
-  (mirroring `setApprovalForAll`), so the contract needs `ERC721Enumerable`
-  to discover which tokenIds the owner currently holds at claim time. A
-  registered collection that is not enumerable is skipped gracefully and
-  logged rather than causing a revert — this is a real constraint of an
-  on-chain-only (no indexer) design, not an oversight.
+`createVault(vaultId, authorizationSigner, kdfSalt, kdfVersion, inactivityPeriod)` stores this record. `vaultId` is a random `bytes32`; `kdfSalt` must be nonzero; the only supported KDF version is `1`; and the inactivity period is between 60 seconds and 10 years inclusive. `claimNonce` starts at zero. Owner vault IDs and token entries are indexed separately.
 
-## Functional entry points (frontend routes)
+Registered token entries are `TokenEntry { address tokenAddress; bool isERC721; }`. For ERC-20 entries, recovery attempts to transfer the lesser of the owner's current balance and the current allowance. For ERC-721 entries, recovery requires `IERC721Enumerable` to discover token IDs and transfers at most `MAX_NFTS_PER_TOKEN = 20` NFTs per collection.
 
-All routes are hash-based (`#/...`) for reliability inside mobile wallet
-in-app WebViews (they don't rely on `pushState`/server routing).
+There is no `secretHash`, plaintext secret field, failed-attempt counter, cooldown timestamp, failure threshold, fee escalation, or lockout state in v2. `getStatus` retains compatibility-shaped `locked` and `cooldownRemaining` return values, but the implementation always returns `false` and `0`.
 
-| Route | Purpose |
-|---|---|
-| `#/` | Landing page — choose "set up a vault" or "claim a vault" |
-| `#/setup` | 5-step owner wizard: connect wallet → choose inactivity period + secret → select assets → approve + register → done |
-| `#/claim` | 4-step claimant flow: look up vault by owner address (or paste vaultId directly) → view status/countdown → enter secret (with live fee preview) → result |
-| `#/dashboard/:vaultId` | Owner dashboard for an existing vault: countdown, near-expiry warning, protected-assets list, ping/add-asset/deactivate controls (gated to the connected wallet matching the vault owner) |
+## KDF v1 And Secret Handling
 
-## Contract entry points (on-chain)
+The browser derives the authorization signer from the secret phrase. The exact implemented KDF is:
 
-| Function | Who calls it | Effect |
-|---|---|---|
-| `createVault(vaultId, secretHash, inactivityPeriod)` | Owner | Registers a new vault |
-| `addToken(vaultId, tokenAddress, isERC721)` | Owner | Registers an asset (owner must separately `approve`/`setApprovalForAll` from their own wallet) |
-| `ping(vaultId)` | Owner | Heartbeat — resets the inactivity timer |
-| `deactivateVault(vaultId)` | Owner | Permanently disables the vault (no more claims possible) |
-| `attemptUnlock(vaultId, secretPlaintext)` | Claimant | Pays the current fee; on match, sweeps registered assets (skip-and-continue) |
-| `getStatus(vaultId)` | Anyone (view) | `(expired, timeRemaining, active, locked, cooldownRemaining)` |
-| `previewFee(vaultId)` | Anyone (view) | Current fee a claim attempt would cost right now |
-| `getVaultTokens(vaultId)` / `getOwnerVaults(owner)` / `getFailedAttempts(vaultId)` | Anyone (view) | Read helpers |
+- Normalize the phrase to Unicode NFC, encode it as UTF-8, reject empty values, unpaired surrogates, and values over 1024 UTF-8 bytes.
+- Run PBKDF2-HMAC-SHA256 with **600,000 iterations** and a 256-bit output.
+- Generate a fresh random `bytes32` salt with `crypto.getRandomValues`; store that salt in the vault.
+- The PBKDF2 salt is the byte concatenation of the ASCII context prefix `DMH phrase key v1\0`, the 32-byte big-endian chain ID, the 20-byte checksummed contract address, the 20-byte owner address, the 32-byte vault ID, the 32-byte KDF salt, and the 4-byte big-endian derivation counter.
+- The counter starts at zero and increments until the 32-byte output is a valid nonzero secp256k1 scalar. The resulting private key is used only locally to derive/sign, then temporary key material is cleared where the frontend controls it.
 
-## Security Notes
+The owner stores the resulting signer address in the vault. A claimant repeats the derivation using the on-chain context and must produce the same signer. The phrase is not submitted as transaction data, put in a transaction event, or stored by the app.
 
-- During vault creation, the secret is hashed locally and only the salted hash
-  is submitted. During a claim, the deployed contract requires
-  `attemptUnlock(vaultId, secretPlaintext)`, so the plaintext secret is public
-  transaction calldata and becomes permanently visible on-chain. Fixing this
-  requires a redesigned claim protocol and a new contract deployment; it
-  cannot be solved by a frontend-only hash.
-- No native `<select>` element is used anywhere in the UI (spec requirement);
-  all "choose one of several" UI uses custom bottom-sheet/chip-group
-  components (`components/DropdownSheet/`).
-- The testnet fee-token and DMH addresses are configured. The mainnet DMH
-  address remains explicitly `null`, so mainnet vault operations fail closed.
-  `scripts/deploy.cjs` throws rather than guessing deployment values.
+**Offline brute-force caveat:** PBKDF2 raises the cost of each guess but does not make a weak phrase safe. The salt, chain, contract, owner, vault ID, and signer authorization context are public or recoverable from chain data, so an attacker can test guesses offline without paying the contract fee. Use a long, unique, high-entropy phrase. The UI's entropy check is a warning/control, not proof of security.
 
-## Networks
+**Browser-memory/XSS caveat:** the phrase and derived key necessarily exist briefly in browser memory while deriving and signing. Clearing input/state and private-key buffers reduces exposure but cannot guarantee erasure from JavaScript engines, browser internals, extensions, compromised wallet browsers, or memory snapshots. Any XSS or malicious dependency running in the page may capture the phrase. Do not treat masking, local clearing, or the static frontend as a guarantee against a compromised browser.
 
-Single-file network switch: `public/static/js/config/network.js`.
+## EIP-712 Claim Authorization
 
-| | Testnet | Mainnet |
+The exact signed struct is:
+
+```solidity
+struct Claim {
+    bytes32 vaultId;
+    address recipient;
+    address feePayer;
+    uint256 nonce;
+    uint256 deadline;
+    uint256 maxFee;
+}
+```
+
+The type string is `Claim(bytes32 vaultId,address recipient,address feePayer,uint256 nonce,uint256 deadline,uint256 maxFee)`.
+
+The domain is `name = DeadMansHand`, `version = 2`, the active BOT Chain `chainId`, and the deployed v2 `verifyingContract` address. The signature is produced locally by the KDF-derived authorization signer.
+
+`recipient` and `feePayer` are separate signed fields. `recipient` receives successfully swept assets and may differ from the signer and fee payer. `feePayer` must equal `msg.sender`; that caller pays the fixed fee-token charge and gas. The contract verifies the vault, active state, exact current nonce, nonzero recipient, deadline, expiry, maximum fee, EIP-712 signature, and fee-payer identity before charging. The frontend currently creates a 15-minute deadline and signs the current fee as `maxFee`.
+
+## One-Time Consume And Asset Consequences
+
+After all authorization checks pass, v2 increments `claimNonce`, sets `active = false`, sets `claimed = true`, collects the fee, and emits `VaultClaimed`. The vault is consumed exactly once. A later claim, including one intended to recover assets skipped during the first sweep, cannot succeed. A fee-transfer failure reverts the transaction and rolls back consumption.
+
+Asset sweeping is **skip-and-continue** after consumption. An ERC-20 query/transfer failure, stale or revoked approval, non-enumerable NFT collection, or failed NFT transfer emits `TokenTransferFailed` and does not prevent later registered entries from being attempted. Successful transfers emit `TokenTransferSucceeded`.
+
+If an enumerable NFT collection contains more than 20 NFTs, only 20 are attempted and the cap is logged. The remaining NFTs cannot be recovered by replaying the claim because the vault is already inactive and consumed. A registered non-enumerable collection is skipped, not treated as recoverable.
+
+The fixed fee is `baseFee`, paid in the immutable deployment `feeToken` to the immutable `feeRecipient`. The testnet deployment uses `1 USDT` at 6 decimals (`1000000`), but the deployed contract's constructor values are authoritative. `maxFee` must be at least the contract's `baseFee`.
+
+## Frontend And Networks
+
+Routes are `#/`, `#/setup`, `#/claim`, and `#/dashboard/:vaultId`. The hash router is intended for wallet in-app-browser compatibility. Network, contract, and fee-token values are read from `public/static/js/config/network.js`; a missing DMH address fails closed rather than guessing.
+
+| | BOT Chain Testnet | BOT Chain Mainnet |
 |---|---|---|
 | Chain ID | 968 | 677 |
 | RPC | `https://rpc.bohr.life` | `https://rpc.botchain.ai` |
-| Explorer (Blockscout) | `https://scan.bohr.life` | `https://scan.botchain.ai` |
-| USDT / fee token | ✅ `0x75edC9335175Fc0552D51D48439F229c10420fe3` | ✅ `0xaBabc7Ddc03e501d190C676BF3d92ef0e6e87a3C` |
-| DMH contract address | ✅ `0x6bAc4F39e81955FD1Be3C890bd158aF0D08701af` | ❌ not deployed |
-| Fee recipient | `0xCC5d74709117c08B803a32C51E108262ed66B4BD` | (same, once deployed) |
-| Deploy params | baseFee=1 USDT, failureThreshold=5, cooldown=24h, maxEscalationDoublings=4 | (not yet set) |
+| Explorer | `https://scan.bohr.life` | `https://scan.botchain.ai` |
+| Fee token | `0x75edC9335175Fc0552D51D48439F229c10420fe3` | `0xaBabc7Ddc03e501d190C676BF3d92ef0e6e87a3C` |
+| v2 DMH address | `0xFa77ceE06328F2D748879e1DB480Ad51Ba856E06` | `null` |
 
-## Development
+The old testnet deployment at `0x6bAc4F39e81955FD1Be3C890bd158aF0D08701af` is a v1 plaintext-secret contract and is intentionally disabled. It is incompatible with the v2 ABI/KDF/EIP-712 flow.
+
+Deployment migration requires a **new contract address**. Existing v1 vaults do not migrate automatically. Existing v1 approvals and signatures must not be assumed valid for v2; owners must create fresh v2 vaults and grant fresh approvals to the new v2 address. Treat any old address as unusable for current frontend operations.
+
+```bash
+DEPLOYER_PRIVATE_KEY=0x... FEE_TOKEN_ADDRESS=0x... FEE_RECIPIENT_ADDRESS=0x... BASE_FEE=1000000 npx hardhat run scripts/deploy.cjs --network botTestnet
+```
+
+`BASE_FEE` is required and is expressed in the fee token's smallest unit. Never put private keys in documentation, source control, or frontend configuration.
+
+### BOT Chain Testnet v2 Deployment
+
+- Contract: `0xFa77ceE06328F2D748879e1DB480Ad51Ba856E06`
+- Creation transaction: `0x55c17884303ded1bbacdaf28a91470e7c2b277c6705a42ecf688108339c3a74b`
+- Fee token: `0x75edC9335175Fc0552D51D48439F229c10420fe3` (`USDT`, 6 decimals)
+- Base fee: `1000000` (1 USDT)
+- Fee recipient: `0x3d53CB82BffA53bdA7217aD3F8a640fE7c052a6e`
+- EIP-712 domain: `DeadMansHand`, version `2`, chain ID `968`, verifying contract equal to the address above
+- KDF version: `1`
+- Blockscout indexing: present
+- Blockscout source verification: not completed
+
+## Development And Security Verification
 
 ```bash
 npm install
 npm run build
-npm run dev
-```
-
-Contract tests:
-
-```bash
 npm run test:contracts
+npm run check
+npm run dev
+npm run preview
 ```
 
-Contract deploy (requires env vars — will throw if `FEE_TOKEN_ADDRESS` or
-`FEE_RECIPIENT_ADDRESS` is missing, by design):
+`npm run check` runs the production build followed by the Hardhat contract suite. The tests cover v2 storage/validation, owner controls, expiry, EIP-712 binding and replay protection, fee rollback, skip-and-continue, NFT enumeration/cap, and reentrancy resistance.
 
-```bash
-DEPLOYER_PRIVATE_KEY=0x... FEE_TOKEN_ADDRESS=0x... FEE_RECIPIENT_ADDRESS=0x... npx hardhat run scripts/deploy.cjs --network botTestnet
-```
+Before any deployment or production claim, inspect deployed bytecode and constructor values; confirm chain ID, EIP-712 verifying address, fee token, and fee recipient; confirm config does not point at the disabled v1 address; run build and contract tests successfully on Node 20-24; exercise the complete disposable testnet flow; inspect sweep success/failure events; test stale approvals, non-enumerable NFTs, and more than 20 NFTs; validate input/network/deadline behavior; and verify that secrets are not logged or stored.
 
-Testnet has already been deployed this way — see the Networks table above
-for the live address. To redeploy (e.g. after a contract change), rerun the
-command above and paste the new address into `network.js`.
-
-## Not yet implemented / not yet done
-
-- Contract not deployed to mainnet (only testnet so far).
-- Production frontend deployment not done.
-- Real mobile-wallet in-app-browser manual test pass not done (see Open
-  Decisions #2) — this is a spec-mandated bar, not optional polish.
-
-## Recommended next steps
-
-1. Confirm the production Vercel project and account.
-2. Deploy the frontend.
-3. Test the whole flow inside MetaMask mobile's in-app browser on a real
-   phone, on testnet, before considering this production-ready.
-4. Deploy to mainnet once testnet is fully verified end-to-end.
+The UI must also be manually tested, including every custom picker and the keyboard-visible secret-entry screen, inside a real mobile wallet in-app browser. MetaMask Mobile is the minimum target. This test has not passed for this repository. These checks are engineering verification, not an audit. No audit, formal verification, or production safety guarantee is claimed.

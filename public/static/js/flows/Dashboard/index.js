@@ -91,11 +91,13 @@ async function loadVault(vaultId) {
     status,
     tokens,
     owner: raw.owner ?? raw[0],
-    inactivityPeriod: raw.inactivityPeriod ?? raw[2],
-    lastActive: raw.lastActive ?? raw[3],
-    exists: raw.exists ?? raw[5],
-    failedAttempts: raw.failedAttempts ?? raw[6],
-    cooldownUntil: raw.cooldownUntil ?? raw[7],
+    inactivityPeriod: raw.inactivityPeriod ?? raw[4],
+    lastActive: raw.lastActive ?? raw[5],
+    exists: raw.exists ?? raw[8],
+    failedAttempts: 0,
+    cooldownUntil: 0,
+    authorizationSigner: raw.authorizationSigner ?? raw.authorization ?? raw[1],
+    claimed: raw.claimed ?? raw[7],
   };
 }
 
@@ -156,11 +158,9 @@ function renderMetadata(region, vaultId, vault) {
     el('div', {}, [el('dt', { class: 'dmh-card-title' }, 'Owner'), el('dd', { class: 'mono' }, vault.owner)]),
     el('div', {}, [el('dt', { class: 'dmh-card-title' }, 'Inactivity period'), el('dd', {}, formatDuration(vault.inactivityPeriod))]),
     el('div', {}, [el('dt', { class: 'dmh-card-title' }, 'Last check-in'), el('dd', {}, formatTimestamp(vault.lastActive))]),
-    el('div', {}, [el('dt', { class: 'dmh-card-title' }, 'Failed claim attempts'), el('dd', {}, String(vault.failedAttempts))]),
-    BigInt(vault.cooldownUntil) > 0n
-      ? el('div', {}, [el('dt', { class: 'dmh-card-title' }, 'Claim cooldown until'), el('dd', {}, formatTimestamp(vault.cooldownUntil))])
-      : null,
     el('div', {}, [el('dt', { class: 'dmh-card-title' }, 'Vault ID'), el('dd', {}, renderCopyableValue(vaultId, 'Vault ID'))]),
+    vault.authorizationSigner != null ? el('div', {}, [el('dt', { class: 'dmh-card-title' }, 'Authorization signer'), el('dd', { class: 'mono' }, String(vault.authorizationSigner))]) : null,
+    vault.claimed != null ? el('div', {}, [el('dt', { class: 'dmh-card-title' }, 'Claimed'), el('dd', {}, vault.claimed ? 'Yes' : 'No')]) : null,
   ]);
   region.replaceChildren(details);
 }

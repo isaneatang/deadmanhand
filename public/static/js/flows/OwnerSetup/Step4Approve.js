@@ -3,6 +3,7 @@ import { el, renderBackBar, renderStepIndicator, renderStickyCta, showToast, for
 import { createVault, addTokenToVault, getErc20WriteContract, getErc721WriteContract } from '../../lib/contract.js';
 import { getActiveNetworkKey, getNetworkConfig } from '../../config/network.js';
 import { ethers } from '../../lib/ethers.js';
+import { getCachedSigner } from '../../lib/wallet.js';
 
 const MAX_ASSETS = 50;
 
@@ -89,7 +90,7 @@ export function renderStep4Approve(container, state, onNext, onBack) {
     }
   }
 
-  addTask('Create vault', () => createVault(state.vaultId, state.secretHash, state.inactivityPeriodSeconds));
+  addTask('Create v2 vault', () => createVault(state.vaultId, state.authorizationSigner, state.kdfSalt, state.kdfVersion, state.inactivityPeriodSeconds));
   for (const asset of normalizedAssets) {
     addTask(
       `${asset.symbol} (${formatAddress(asset.address)}) — ${asset.isErc721 ? 'approve collection' : 'approve token'}`,
@@ -123,6 +124,23 @@ export function renderStep4Approve(container, state, onNext, onBack) {
     queueStatus.textContent = message;
   }
 
+  async function assertDerivationContext() {
+    const currentNet = getNetworkConfig();
+    const signer = getCachedSigner();
+    if (!signer) throw new Error('Reconnect the owner wallet and restart setup.');
+    const [walletAddress, walletNetwork] = await Promise.all([signer.getAddress(), signer.provider.getNetwork()]);
+    if (ethers.getAddress(walletAddress) !== ethers.getAddress(state.derivationOwnerAddress || state.address)) {
+      throw new Error('The connected account changed after recovery-key derivation. Restart setup with the intended owner wallet.');
+    }
+    if (
+      walletNetwork.chainId !== BigInt(state.derivationChainId)
+      || currentNet.chainId !== state.derivationChainId
+      || currentNet.dmhContractAddress?.toLowerCase() !== state.derivationContractAddress?.toLowerCase()
+    ) {
+      throw new Error('The network or DMH contract changed after recovery-key derivation. Restart setup on the intended deployment.');
+    }
+  }
+
   async function runQueue() {
     if (running || validationError) return;
     if (nextTaskIndex >= tasks.length) {
@@ -135,6 +153,16 @@ export function renderStep4Approve(container, state, onNext, onBack) {
     actionBtn.disabled = true;
     backBtn.disabled = true;
     backBtn.setAttribute('aria-label', 'Back unavailable after transactions start');
+    try {
+      await assertDerivationContext();
+    } catch (error) {
+      setQueueMessage(error.message, true);
+      actionBtn.disabled = false;
+      backBtn.disabled = false;
+      running = false;
+      delete document.body.dataset.dmhTransactionLock;
+      return;
+    }
     while (nextTaskIndex < tasks.length) {
       if (!container.isConnected || getActiveNetworkKey() !== networkKey) {
         setQueueMessage('Transaction queue stopped because the screen or selected network changed. Return to setup and verify on-chain state before continuing.', true);
@@ -146,6 +174,7 @@ export function renderStep4Approve(container, state, onNext, onBack) {
       setTaskStatus(task, 'active');
       setQueueMessage(`Transaction ${nextTaskIndex + 1} of ${tasks.length}: confirm “${task.label}” in your wallet, then wait for network confirmation.`);
       try {
+        await assertDerivationContext();
         await task.run();
         setTaskStatus(task, 'success');
         nextTaskIndex += 1;

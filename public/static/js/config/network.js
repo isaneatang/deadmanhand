@@ -37,12 +37,9 @@ const NETWORKS = {
     usdtAddress: '0x75edC9335175Fc0552D51D48439F229c10420fe3', // confirmed testnet Tether USD
     usdtDecimals: 6,
     faucetUrl: 'https://faucet.botchain.ai/basic',
-    // Deployed 2026-08-28. Constructor args: feeToken=usdtAddress above,
-    // baseFee=1_000000 (1 USDT), failureThreshold=5, cooldownDuration=86400
-    // (24h), maxEscalationDoublings=4, feeRecipient confirmed by product
-    // owner (verified on-chain to match: dmh.feeRecipient() ==
-    // 0xCC5d74709117c08B803a32C51E108262ed66B4BD).
-    dmhContractAddress: '0x6bAc4F39e81955FD1Be3C890bd158aF0D08701af',
+    // Immutable EIP-712 v2 deployment. The old v1 plaintext-secret contract
+    // remains incompatible and must not be used by this frontend.
+    dmhContractAddress: '0xFa77ceE06328F2D748879e1DB480Ad51Ba856E06',
   },
   mainnet: {
     chainId: 677,

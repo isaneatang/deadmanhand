@@ -1,7 +1,8 @@
 // flows/OwnerSetup/Step2Secret.js — Step 2: Set inactivity period + secret (with entropy check)
 import { el, renderBackBar, renderStepIndicator, renderStickyCta, showToast, formatDuration } from '../../components/theme/ui.js';
 import { renderChipGroup } from '../../components/DropdownSheet/DropdownSheet.js';
-import { checkSecretEntropy, computeSecretHash, generateVaultId } from '../../lib/hashing.js';
+import { checkSecretEntropy, deriveAuthorizationSigner, generateKdfSalt, generateRecoverySecret, generateVaultId } from '../../lib/hashing.js';
+import { getNetworkConfig } from '../../config/network.js';
 
 // Contract-enforced bounds (see MIN_INACTIVITY_PERIOD / MAX_INACTIVITY_PERIOD
 // in DeadMansHand.sol). The vault creator is free to choose ANY duration in
@@ -55,6 +56,7 @@ export function renderStep2Secret(container, state, onNext, onBack) {
 
   let entropyResult = { ok: false, reasons: [], entropyBits: 0 };
   let showSecret = false;
+  let backupConfirmed = false;
 
   const countInput = el('input', {
     id: 'owner-inactivity-count',
@@ -129,7 +131,8 @@ export function renderStep2Secret(container, state, onNext, onBack) {
     autocomplete: 'new-password',
     autocapitalize: 'off',
     spellcheck: 'false',
-    placeholder: 'Enter a long, unique secret phrase',
+    placeholder: 'Generate a recovery secret below',
+    readonly: 'true',
   });
   const confirmInput = el('input', {
     id: 'owner-secret-confirm',
@@ -141,7 +144,7 @@ export function renderStep2Secret(container, state, onNext, onBack) {
     placeholder: 'Re-enter the same secret',
   });
 
-  const entropyFeedback = el('div', { class: 'dmh-hint', id: 'owner-secret-strength', role: 'status', 'aria-live': 'polite' }, 'Enter a secret to check its strength.');
+  const entropyFeedback = el('div', { class: 'dmh-hint', id: 'owner-secret-strength', role: 'status', 'aria-live': 'polite' }, 'Generate a cryptographically random recovery secret.');
   const matchFeedback = el('div', { class: 'dmh-error-text', id: 'owner-secret-match', role: 'alert', 'aria-live': 'assertive' });
   secretInput.setAttribute('aria-describedby', 'owner-secret-strength');
   confirmInput.setAttribute('aria-describedby', 'owner-secret-match');
@@ -162,11 +165,38 @@ export function renderStep2Secret(container, state, onNext, onBack) {
     toggleShowBtn.setAttribute('aria-pressed', String(showSecret));
   });
 
+  const generateBtn = el('button', { class: 'dmh-btn dmh-btn-secondary', type: 'button' }, 'Generate secure recovery secret');
+  const backupCheckbox = el('input', { type: 'checkbox', id: 'owner-secret-backed-up' });
+  backupCheckbox.addEventListener('change', () => {
+    backupConfirmed = backupCheckbox.checked;
+    updateContinueState();
+  });
+  const backupConfirmation = el('label', { class: 'dmh-card', for: 'owner-secret-backed-up' }, [
+    backupCheckbox,
+    el('span', {}, 'I recorded this exact recovery secret offline. DMH cannot recover or display it after this screen.'),
+  ]);
+  generateBtn.addEventListener('click', () => {
+    secretValue = generateRecoverySecret();
+    confirmValue = '';
+    secretInput.value = secretValue;
+    confirmInput.value = '';
+    backupConfirmed = false;
+    backupCheckbox.checked = false;
+    showSecret = true;
+    secretInput.type = 'text';
+    confirmInput.type = 'text';
+    toggleShowBtn.textContent = 'Hide';
+    toggleShowBtn.setAttribute('aria-pressed', 'true');
+    updateEntropyFeedback();
+    updateMatchFeedback();
+    confirmInput.focus();
+  });
+
   function updateEntropyFeedback() {
     entropyResult = checkSecretEntropy(secretValue);
     entropyFeedback.innerHTML = '';
     if (secretValue.length === 0) {
-      entropyFeedback.textContent = 'Enter a secret to check its strength.';
+      entropyFeedback.textContent = 'Generate a cryptographically random recovery secret.';
       entropyFeedback.className = 'dmh-hint';
       return;
     }
@@ -201,20 +231,32 @@ export function renderStep2Secret(container, state, onNext, onBack) {
 
   function updateContinueState() {
     const periodOk = periodValue >= MIN_SECONDS && periodValue <= MAX_SECONDS;
-    const canContinue = periodOk && entropyResult.ok && confirmValue === secretValue && secretValue.length > 0;
+    const canContinue = periodOk && entropyResult.ok && confirmValue === secretValue && secretValue.length > 0 && backupConfirmed;
     continueBtn.disabled = !canContinue;
   }
   updateContinueState();
   recomputePeriod();
 
-  continueBtn.addEventListener('click', () => {
+  continueBtn.addEventListener('click', async () => {
     if (continueBtn.disabled) return;
     try {
-      const vaultId = state.vaultId || generateVaultId();
-      const secretHash = computeSecretHash(secretValue, state.address, vaultId);
+      continueBtn.disabled = true;
+      continueBtn.textContent = 'Deriving authorization key…';
+      const net = getNetworkConfig();
+      const vaultId = generateVaultId();
+      const kdfSalt = generateKdfSalt();
+      const derived = await deriveAuthorizationSigner(secretValue, {
+        chainId: net.chainId, contractAddress: net.dmhContractAddress, ownerAddress: state.address, vaultId, kdfSalt,
+      });
 
       state.vaultId = vaultId;
-      state.secretHash = secretHash;
+      state.kdfSalt = kdfSalt;
+      state.authorizationSigner = derived.address;
+      state.kdfVersion = derived.kdfVersion;
+      state.derivationChainId = net.chainId;
+      state.derivationContractAddress = net.dmhContractAddress;
+      state.derivationOwnerAddress = state.address;
+      derived.privateKey.fill(0);
       state.inactivityPeriodSeconds = periodValue;
 
       // Clear the secret from local closures immediately after hashing
@@ -228,6 +270,8 @@ export function renderStep2Secret(container, state, onNext, onBack) {
       onNext();
     } catch (e) {
       showToast(e.message, 'error');
+      continueBtn.disabled = false;
+      continueBtn.textContent = 'Continue';
     }
   });
 
@@ -235,8 +279,8 @@ export function renderStep2Secret(container, state, onNext, onBack) {
   container.appendChild(renderStepIndicator(2, 5));
   container.appendChild(
     el('div', { class: 'dmh-main' }, [
-      el('h1', { class: 'dmh-heading' }, 'Set your secret & inactivity period'),
-      el('p', { class: 'dmh-subheading' }, 'Anyone who knows this secret — after you go inactive past the period below — can claim the assets you protect. Never share it casually. Only give it to whoever should inherit access.'),
+       el('h1', { class: 'dmh-heading' }, 'Set your secret & inactivity period'),
+       el('p', { class: 'dmh-subheading' }, 'Your phrase derives an authorization signer locally. It never enters a transaction or browser storage. Anyone with the phrase can authorize a claim after this vault becomes inactive.'),
 
       el('div', { class: 'dmh-field' }, [
         el('label', { class: 'dmh-label', for: 'owner-inactivity-count' }, 'Inactivity period — choose any duration'),
@@ -252,6 +296,7 @@ export function renderStep2Secret(container, state, onNext, onBack) {
 
       el('div', { class: 'dmh-field' }, [
         el('label', { class: 'dmh-label', for: 'owner-secret' }, 'Secret phrase'),
+        generateBtn,
         el('div', { class: 'dmh-input-wrap' }, [secretInput, toggleShowBtn]),
         entropyFeedback,
       ]),
@@ -262,7 +307,9 @@ export function renderStep2Secret(container, state, onNext, onBack) {
         matchFeedback,
       ]),
 
-      el('div', { class: 'dmh-warning-banner' }, "During vault creation, this secret is hashed on your device and only the creation hash is submitted on-chain; the plaintext is not sent. The creation hash is public forever, so a weak secret can be brute-forced offline. A later claimant must submit the plaintext secret in a claim transaction, which is public on-chain and is not private."),
+      backupConfirmation,
+
+       el('div', { class: 'dmh-warning-banner' }, 'The phrase is used only on this device to derive the authorization signer. Keep it private and back it up securely. A claimant signs a structured authorization locally; the phrase is never included in claim calldata.'),
     ])
   );
   container.appendChild(renderStickyCta(continueBtn));

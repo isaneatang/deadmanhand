@@ -117,14 +117,14 @@ export function showMainnetConfirmation(onConfirm) {
   const overlay = el('div', { class: 'dmh-sheet-overlay open' });
   const sheet = el('div', { class: 'dmh-sheet open', role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': 'dmh-mainnet-title' }, [
     el('div', { class: 'dmh-sheet-handle' }),
-    el('div', { class: 'dmh-main', style: 'padding-bottom: 24px;' }, [
+    el('div', { class: 'dmh-main dmh-sheet-main' }, [
       el('div', { class: 'dmh-warning-banner danger' }, [
         el('div', {}, [
           el('strong', { id: 'dmh-mainnet-title' }, 'You are about to interact with MAINNET.'),
-          el('p', { style: 'margin: 8px 0 0;' }, 'This uses real BOT Chain funds. Transactions cannot be undone. Only continue if you understand the risk.'),
+          el('p', { class: 'dmh-warning-copy' }, 'This uses real BOT Chain funds. Transactions cannot be undone. Only continue if you understand the risk.'),
         ]),
       ]),
-      el('div', { style: 'display:flex; gap: 12px; margin-top: 16px;' }, [
+      el('div', { class: 'dmh-confirm-actions' }, [
         el('button', {
           class: 'dmh-btn dmh-btn-secondary',
           onClick: close,
@@ -173,11 +173,11 @@ function keepFocusInside(event, container) {
 // Back button (Section 5 — persistent, ≥44x44px, never rely on device back)
 // ---------------------------------------------------------------------
 export function renderBackBar(onBack, stepLabel) {
-  const bar = el('div', { style: 'display:flex; align-items:center; gap: 12px; padding: 8px 16px 0;' }, [
+  const bar = el('div', { class: 'dmh-back-bar' }, [
     el('button', { class: 'dmh-back-btn', 'aria-label': 'Back', onClick: onBack }, '←'),
   ]);
   if (stepLabel) {
-    bar.appendChild(el('div', { class: 'mono', style: 'font-size: 12px; color: var(--dmh-text-secondary);' }, stepLabel));
+    bar.appendChild(el('div', { class: 'mono dmh-step-label' }, stepLabel));
   }
   return bar;
 }

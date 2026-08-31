@@ -1,7 +1,7 @@
 // flows/ClaimantFlow/Step1Lookup.js — Step 1: Lookup — address field primary, vaultId secondary/advanced
 import { el, renderStepIndicator, renderStickyCta, formatDuration } from '../../components/theme/ui.js';
 import { ethers } from '../../lib/ethers.js';
-import { lookupVaultsByAddress, getVaultOwner, getVaultStatus } from '../../lib/contract.js';
+import { lookupVaultsByAddress, getVaultOwner, getVaultStatus, getVaultMetadata } from '../../lib/contract.js';
 import { DmhNotDeployedError } from '../../lib/contract.js';
 
 export function renderStep1Lookup(container, state, onFound) {
@@ -47,6 +47,7 @@ export function renderStep1Lookup(container, state, onFound) {
           throw new Error('No vault found with that ID.');
         }
         const status = await getVaultStatus(vaultIdRaw);
+        state.vault = await getVaultMetadata(vaultIdRaw);
         state.vaultId = vaultIdRaw;
         state.ownerAddress = owner;
         state.status = status;
@@ -69,15 +70,16 @@ export function renderStep1Lookup(container, state, onFound) {
         state.vaultId = vaults[0].vaultId;
         state.ownerAddress = checksummed;
         state.status = vaults[0];
+        state.vault = await getVaultMetadata(vaults[0].vaultId);
         onFound();
         return;
       }
 
       const choiceButtons = vaults.map((vault, index) => {
-        let statusText = 'Claimable';
-        if (!vault.active) statusText = 'Deactivated';
-        else if (vault.locked) statusText = `Cooldown: ${formatDuration(vault.cooldownRemaining)}`;
-        else if (!vault.expired) statusText = `Available in ${formatDuration(vault.timeRemaining)}`;
+         let statusText = 'Claimable';
+         if (vault.claimed) statusText = 'Already claimed';
+         else if (!vault.active) statusText = 'Deactivated';
+         else if (!vault.expired) statusText = `Available in ${formatDuration(vault.timeRemaining)}`;
 
         const button = el('button', {
           class: 'dmh-card',
@@ -88,12 +90,13 @@ export function renderStep1Lookup(container, state, onFound) {
           el('div', { class: 'dmh-card-title' }, `Vault ${index + 1}: ${statusText}`),
           el('div', { class: 'mono', style: 'font-size:12px; color: var(--dmh-text-muted); word-break:break-all;' }, vault.vaultId),
         ]);
-        button.addEventListener('click', () => {
-          state.vaultId = vault.vaultId;
-          state.ownerAddress = checksummed;
-          state.status = vault;
-          onFound();
-        });
+         button.addEventListener('click', async () => {
+           state.vaultId = vault.vaultId;
+           state.ownerAddress = checksummed;
+           state.status = vault;
+           state.vault = await getVaultMetadata(vault.vaultId);
+           onFound();
+         });
         return button;
       });
       choicesEl.appendChild(el('div', { class: 'dmh-field', role: 'group', 'aria-labelledby': 'claimant-vault-choices-title' }, [

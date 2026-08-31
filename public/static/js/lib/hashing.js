@@ -1,141 +1,108 @@
-// lib/hashing.js
-//
-// Client-side-only secret hashing. Per Master Build Prompt Section 7 / UI
-// Addendum v2 Section 7: the plaintext secret must NEVER touch a network
-// request, transaction payload, event log, console log, or
-// localStorage/sessionStorage. It is hashed here, in-memory, immediately on
-// submit, and the plaintext is discarded by the caller right after.
-//
-// Hash scheme (must exactly match DeadMansHand.sol):
-//   secretHash = keccak256(abi.encodePacked(secretPlaintext, ownerAddress, vaultId))
-// which is Solidity's packed encoding of (string, address, bytes32). We
-// reproduce that exact byte layout client-side using ethers' keccak256 +
-// solidityPacked (no new dependency — ethers is already the pinned wallet
-// library used elsewhere in this stack, per the dependency-hygiene rule).
-//
-// We deliberately do NOT use the browser's native crypto.subtle.digest here:
-// crypto.subtle only exposes SHA-256/SHA-384/SHA-512, not keccak256, and the
-// on-chain contract's secretHash comparison is keccak256-based to match
-// Solidity's native hash. Using a different hash function client-side would
-// simply never match the contract. ethers.keccak256 is the correct choice
-// and is already an established dependency (see lib/ethers.js).
-
 import { ethers } from './ethers.js';
 
-/**
- * Compute the exact on-chain secretHash for a candidate secret.
- * @param {string} secretPlaintext - raw secret, never persisted anywhere.
- * @param {string} ownerAddress - checksummed EOA address of the vault owner.
- * @param {string} vaultId - bytes32 hex string (0x + 64 hex chars).
- * @returns {string} bytes32 hex hash, ready to submit as secretHash / for
- *          local comparison in attemptUnlock's client-side call.
- */
-export function computeSecretHash(secretPlaintext, ownerAddress, vaultId) {
-  if (typeof secretPlaintext !== 'string' || secretPlaintext.length === 0) {
-    throw new Error('secretPlaintext must be a non-empty string');
-  }
-  if (!ethers.isAddress(ownerAddress)) {
-    throw new Error('ownerAddress is not a valid address');
-  }
-  if (!/^0x[0-9a-fA-F]{64}$/.test(vaultId)) {
-    throw new Error('vaultId must be a bytes32 hex string');
-  }
+const ITERATIONS = 600000;
+const KDF_VERSION = 1;
+const PREFIX = new TextEncoder().encode('DMH phrase key v1\0');
+const SECP256K1_ORDER = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141');
 
-  const checksummed = ethers.getAddress(ownerAddress);
-  const packed = ethers.solidityPacked(['string', 'address', 'bytes32'], [secretPlaintext, checksummed, vaultId]);
-  return ethers.keccak256(packed);
+function bytes(value) { return new TextEncoder().encode(value); }
+
+function utf8Phrase(phrase) {
+  if (typeof phrase !== 'string') throw new Error('Secret phrase must be text.');
+  for (let i = 0; i < phrase.length; i++) {
+    const c = phrase.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      if (i + 1 >= phrase.length || phrase.charCodeAt(i + 1) < 0xdc00 || phrase.charCodeAt(i + 1) > 0xdfff) throw new Error('Secret phrase contains an unpaired surrogate.');
+      i++;
+    } else if (c >= 0xdc00 && c <= 0xdfff) throw new Error('Secret phrase contains an unpaired surrogate.');
+  }
+  const normalized = phrase.normalize('NFC');
+  const encoded = bytes(normalized);
+  if (encoded.length > 1024) throw new Error('Secret phrase must be at most 1024 UTF-8 bytes.');
+  if (encoded.length === 0) throw new Error('Secret phrase must not be empty.');
+  return { normalized, encoded };
 }
 
-/**
- * Generate a fresh, random, opaque vaultId. Per Master Build Prompt Section
- * 4.1: vaultId must be owner-generated and random, NOT derived from the
- * owner's address, so it isn't guessable on its own.
- * @returns {string} bytes32 hex string.
- */
-export function generateVaultId() {
-  const randomBytes = new Uint8Array(32);
-  crypto.getRandomValues(randomBytes);
-  return ethers.hexlify(randomBytes);
+function uintBE(value, size) {
+  let n = BigInt(value);
+  const out = new Uint8Array(size);
+  for (let i = size - 1; i >= 0; i--) { out[i] = Number(n & 255n); n >>= 8n; }
+  if (n !== 0n) throw new Error('Integer does not fit the requested encoding.');
+  return out;
 }
 
-// ---------------------------------------------------------------------
-// Entropy check (Master Build Prompt Section 4.1)
-// ---------------------------------------------------------------------
-//
-// The on-chain secretHash is public forever and can be brute-forced offline
-// at zero cost once someone knows/guesses the owner's address + vaultId
-// (both are public). The flat unlock fee only deters ON-CHAIN guessing.
-// Entropy is the only real defense against OFFLINE guessing, so this check
-// is load-bearing security, not UX polish.
-
-const COMMON_WORDS = [
-  'password', 'letmein', 'qwerty', 'admin', 'welcome', 'monkey', 'dragon',
-  'secret', 'iloveyou', 'trustno1', 'sunshine', 'master', 'football',
-  'baseball', 'superman', 'batman', 'shadow', 'michael', 'jennifer',
-  'starwars', 'princess', 'abc123', 'passw0rd', 'summer', 'winter',
-  'autumn', 'spring', 'freedom', 'liberty', 'america', 'money', 'ninja',
-];
-
-const SEQUENTIAL_PATTERNS = ['123456', '654321', 'abcdef', 'qwertyuiop', 'aaaaaa', '000000', '111111'];
-
-/**
- * Rough Shannon-entropy-style estimate in bits, using character-class pool
- * size as a proxy for per-character entropy (standard heuristic — not a
- * cryptographic guarantee, but good enough to reject genuinely weak input).
- */
-function estimateEntropyBits(secret) {
-  let poolSize = 0;
-  if (/[a-z]/.test(secret)) poolSize += 26;
-  if (/[A-Z]/.test(secret)) poolSize += 26;
-  if (/[0-9]/.test(secret)) poolSize += 10;
-  if (/[^a-zA-Z0-9]/.test(secret)) poolSize += 33; // approx printable symbol/space pool
-  if (poolSize === 0) return 0;
-
-  const bitsPerChar = Math.log2(poolSize);
-  return bitsPerChar * secret.length;
+function concat(...parts) {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0; for (const part of parts) { out.set(part, at); at += part.length; }
+  return out;
 }
 
-/**
- * Validate a candidate secret against the minimum-entropy bar.
- * @param {string} secret
- * @returns {{ ok: boolean, reasons: string[], entropyBits: number }}
- */
+function addressBytes(address) { return ethers.getBytes(ethers.getAddress(address)); }
+
+export function generateVaultId() { return ethers.hexlify(crypto.getRandomValues(new Uint8Array(32))); }
+export function generateKdfSalt() { return ethers.hexlify(crypto.getRandomValues(new Uint8Array(32))); }
+export function generateRecoverySecret() {
+  const hex = ethers.hexlify(crypto.getRandomValues(new Uint8Array(32))).slice(2);
+  return hex.match(/.{1,8}/g).join('-');
+}
+
+export async function deriveAuthorizationKey(phrase, { chainId, contractAddress, ownerAddress, vaultId, kdfSalt, counter = 0 }) {
+  const { encoded } = utf8Phrase(phrase);
+  if (!Number.isInteger(counter) || counter < 0 || counter > 0xffffffff) throw new Error('Invalid derivation counter.');
+  const salt = concat(PREFIX, uintBE(chainId, 32), addressBytes(contractAddress), addressBytes(ownerAddress), ethers.getBytes(vaultId), ethers.getBytes(kdfSalt), uintBE(counter, 4));
+  try {
+    const baseKey = await crypto.subtle.importKey('raw', encoded, 'PBKDF2', false, ['deriveBits']);
+    const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: ITERATIONS, hash: 'SHA-256' }, baseKey, 256);
+    const privateKey = new Uint8Array(bits);
+    const scalar = BigInt(`0x${ethers.hexlify(privateKey).slice(2)}`);
+    if (scalar === 0n || scalar >= SECP256K1_ORDER) {
+      privateKey.fill(0);
+      return null;
+    }
+    const wallet = new ethers.Wallet(ethers.hexlify(privateKey));
+    return { privateKey, address: wallet.address, counter, kdfVersion: KDF_VERSION };
+  } finally {
+    encoded.fill(0);
+    salt.fill(0);
+  }
+}
+
+export async function deriveAuthorizationSigner(phrase, context) {
+  for (let counter = 0; counter <= 0xffffffff; counter++) {
+    const result = await deriveAuthorizationKey(phrase, { ...context, counter });
+    if (result) return result;
+  }
+  throw new Error('Could not derive a valid secp256k1 key.');
+}
+
+export async function signClaimWithKey(key, claim, domain) {
+  try {
+    const signature = await new ethers.Wallet(key.privateKey).signTypedData(domain, {
+      Claim: [
+        { name: 'vaultId', type: 'bytes32' }, { name: 'recipient', type: 'address' },
+        { name: 'feePayer', type: 'address' }, { name: 'nonce', type: 'uint256' },
+        { name: 'deadline', type: 'uint256' }, { name: 'maxFee', type: 'uint256' },
+      ],
+    }, claim);
+    return { signature, signer: key.address, counter: key.counter, kdfVersion: key.kdfVersion };
+  } finally { key.privateKey.fill(0); }
+}
+
+export async function signClaim(phrase, context, claim, domain) {
+  return signClaimWithKey(await deriveAuthorizationSigner(phrase, context), claim, domain);
+}
+
+const COMMON_WORDS = ['password','letmein','qwerty','admin','welcome','monkey','dragon','secret','iloveyou','trustno1','sunshine','master','football','baseball','superman','batman','shadow','michael','jennifer','starwars','princess','abc123','passw0rd','summer','winter','autumn','spring','freedom','liberty','america','money','ninja'];
+const SEQUENTIAL_PATTERNS = ['123456','654321','abcdef','qwertyuiop','aaaaaa','000000','111111'];
 export function checkSecretEntropy(secret) {
-  const reasons = [];
-  const trimmed = secret ?? '';
-
-  if (trimmed.length < 12) {
-    reasons.push('Must be at least 12 characters long.');
-  }
-
-  const lower = trimmed.toLowerCase();
-  for (const word of COMMON_WORDS) {
-    if (lower.includes(word)) {
-      reasons.push(`Contains a common dictionary word ("${word}") — too easy to guess offline.`);
-      break;
-    }
-  }
-
-  for (const pattern of SEQUENTIAL_PATTERNS) {
-    if (lower.includes(pattern)) {
-      reasons.push('Contains an obvious sequential/repeated pattern.');
-      break;
-    }
-  }
-
-  // Reject secrets that are almost entirely one repeated character/emoji.
-  const uniqueChars = new Set(trimmed).size;
-  if (trimmed.length > 0 && uniqueChars <= 2 && trimmed.length >= 4) {
-    reasons.push('Too repetitive — needs more distinct characters.');
-  }
-
-  const entropyBits = estimateEntropyBits(trimmed);
-  const MIN_ENTROPY_BITS = 60; // roughly comparable to a random 10-char mixed-case+digit+symbol string
-  if (entropyBits < MIN_ENTROPY_BITS) {
-    reasons.push(
-      `Estimated entropy too low (${entropyBits.toFixed(0)} bits, need ≥${MIN_ENTROPY_BITS}). Mix character types and use more length.`
-    );
-  }
-
+  const value = secret ?? '', reasons = [];
+  if (value.length < 12) reasons.push('Must be at least 12 characters long.');
+  const lower = value.toLowerCase();
+  if (COMMON_WORDS.some((word) => lower.includes(word))) reasons.push('Contains a common dictionary word and is too easy to guess offline.');
+  if (SEQUENTIAL_PATTERNS.some((pattern) => lower.includes(pattern))) reasons.push('Contains an obvious sequential or repeated pattern.');
+  if (value && new Set(value).size <= 2 && value.length >= 4) reasons.push('Too repetitive: use more distinct characters.');
+  let pool = 0; if (/[a-z]/.test(value)) pool += 26; if (/[A-Z]/.test(value)) pool += 26; if (/[0-9]/.test(value)) pool += 10; if (/[^a-zA-Z0-9]/.test(value)) pool += 33;
+  const entropyBits = pool ? Math.log2(pool) * value.length : 0;
+  if (entropyBits < 60) reasons.push(`Estimated entropy too low (${entropyBits.toFixed(0)} bits, need 60).`);
   return { ok: reasons.length === 0, reasons, entropyBits };
 }

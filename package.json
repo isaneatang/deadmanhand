@@ -1,5 +1,6 @@
 {
   "name": "dead-mans-hand",
+  "version": "2.0.0",
   "type": "module",
   "engines": {
     "node": ">=20 <25"
@@ -7,12 +8,14 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "check": "npm run build && npm run test:contracts",
+    "check": "npm run build && npm run test:contracts && npm run test:kdf",
     "test:contracts": "hardhat test --config hardhat.config.cjs",
+    "test:kdf": "node --test test-browser/hashing.test.mjs",
     "preview": "vite preview",
     "deploy": "npm run build && npx vercel --prod"
   },
   "dependencies": {
+    "ethers": "6.17.0",
     "hono": "^4.13.5"
   },
   "devDependencies": {

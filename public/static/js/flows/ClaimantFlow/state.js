@@ -4,9 +4,10 @@ export function createClaimState() {
     step: 1,
     lookupAddress: null,
     vaultId: null, // resolved from address, or entered directly via advanced lookup
-    ownerAddress: null, // needed client-side to recompute the secret hash
-    status: null, // {expired, timeRemaining, active, locked, cooldownRemaining}
-    claimantAddress: null,
-    result: null, // {matched, succeeded, failed, feePaid}
+    ownerAddress: null,
+    vault: null,
+    status: null,
+    feePayerAddress: null,
+    result: null,
   };
 }

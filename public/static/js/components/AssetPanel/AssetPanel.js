@@ -78,7 +78,6 @@ export function renderAssetPanel({ address, selectable = false, onSelectionChang
       const knob = el('div', { class: 'dmh-toggle-knob' });
       const toggle = el('button', {
         class: `dmh-toggle${isOn ? ' on' : ''}`,
-        style: 'padding:0;',
         type: 'button',
         role: 'switch',
         'aria-checked': String(isOn),
@@ -186,7 +185,7 @@ export function renderAssetPanel({ address, selectable = false, onSelectionChang
   function renderManualPasteFallback(onAdd) {
     const inputId = `dmh-manual-token-${address.slice(2).toLowerCase()}`;
     const input = el('input', { id: inputId, class: 'dmh-input mono', placeholder: '0x... token contract address', type: 'text' });
-    const typeChips = el('div', { class: 'dmh-chip-row', style: 'margin-top:8px;', role: 'group', 'aria-label': 'Token type' });
+    const typeChips = el('div', { class: 'dmh-chip-row dmh-manual-type', role: 'group', 'aria-label': 'Token type' });
     let manualType = 'ERC-20';
     const chipErc20 = el('button', { class: 'dmh-chip selected', type: 'button', 'aria-pressed': 'true' }, 'ERC-20');
     const chipErc721 = el('button', { class: 'dmh-chip', type: 'button', 'aria-pressed': 'false' }, 'ERC-721 (NFT collection)');
@@ -207,7 +206,7 @@ export function renderAssetPanel({ address, selectable = false, onSelectionChang
     typeChips.appendChild(chipErc20);
     typeChips.appendChild(chipErc721);
 
-    const addBtn = el('button', { class: 'dmh-btn dmh-btn-secondary', style: 'margin-top:8px;' }, 'Add token');
+    const addBtn = el('button', { class: 'dmh-btn dmh-btn-secondary dmh-manual-add' }, 'Add token');
     addBtn.addEventListener('click', async () => {
       const raw = input.value.trim();
       if (!ethers.isAddress(raw)) {
@@ -238,7 +237,7 @@ export function renderAssetPanel({ address, selectable = false, onSelectionChang
       }
     });
 
-    return el('div', { class: 'dmh-field', style: 'margin-top: 8px;' }, [
+    return el('div', { class: 'dmh-field dmh-manual-fallback' }, [
       el('label', { class: 'dmh-label', for: inputId }, "Can't see your token? Paste its contract address"),
       input,
       typeChips,
@@ -249,7 +248,7 @@ export function renderAssetPanel({ address, selectable = false, onSelectionChang
   async function refresh() {
     container.innerHTML = '';
     container.appendChild(el('div', { class: 'dmh-card-title' }, 'Wallet Holdings'));
-    container.appendChild(el('div', { style: 'display:flex; align-items:center; gap:8px; color: var(--dmh-text-muted); font-size:13px;' }, [
+    container.appendChild(el('div', { class: 'dmh-scan-status' }, [
       el('span', { class: 'dmh-spinner' }),
       'Scanning holdings…',
     ]));

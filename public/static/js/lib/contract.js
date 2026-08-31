@@ -58,9 +58,9 @@ export function getErc721WriteContract(tokenAddress) {
 // High-level operations
 // ---------------------------------------------------------------------
 
-export async function createVault(vaultId, secretHash, inactivityPeriodSeconds) {
+export async function createVault(vaultId, authorizationSigner, kdfSalt, kdfVersion, inactivityPeriodSeconds) {
   const dmh = getDmhWriteContract();
-  const tx = await dmh.createVault(vaultId, secretHash, BigInt(inactivityPeriodSeconds));
+  const tx = await dmh.createVault(vaultId, authorizationSigner, kdfSalt, kdfVersion, BigInt(inactivityPeriodSeconds));
   return tx.wait();
 }
 
@@ -83,30 +83,31 @@ export async function deactivateVault(vaultId) {
 }
 
 /**
- * @returns {{expired: boolean, timeRemaining: bigint, active: boolean, locked: boolean, cooldownRemaining: bigint}}
+ * @returns {{expired: boolean, timeRemaining: bigint, active: boolean, claimed: boolean}}
  */
 export async function getVaultStatus(vaultId) {
   const dmh = getDmhReadContract();
-  const result = await dmh.getStatus(vaultId);
+  const result = await getVaultMetadata(vaultId);
+  if (!result.exists) throw new Error('No vault found with that ID.');
+  const block = await getReadOnlyProvider().getBlock('latest');
+  const remaining = BigInt(result.lastActive) + BigInt(result.inactivityPeriod) - BigInt(block.timestamp);
   return {
-    expired: result.expired,
-    timeRemaining: result.timeRemaining,
+    expired: remaining <= 0n,
+    timeRemaining: remaining > 0n ? remaining : 0n,
     active: result.active,
-    locked: result.locked,
-    cooldownRemaining: result.cooldownRemaining,
+    claimed: result.claimed, locked: false, cooldownRemaining: 0n,
   };
 }
 
-/**
- * Fetch the owner address stored for a vaultId (public `vaults` mapping
- * getter) — needed client-side to recompute the secret hash for comparison
- * before/while calling attemptUnlock.
- */
-export async function getVaultOwner(vaultId) {
-  const dmh = getDmhReadContract();
-  const result = await dmh.vaults(vaultId);
-  return result.owner ?? result[0];
+export async function getVaultMetadata(vaultId) {
+  const result = await getDmhReadContract().vaults(vaultId);
+  return Object.fromEntries(['owner','authorizationSigner','kdfSalt','kdfVersion','inactivityPeriod','lastActive','active','claimed','exists','claimNonce'].map((key, i) => [key, result[key] ?? result[i]]));
 }
+
+/**
+ * Fetch the owner address stored for a vaultId.
+ */
+export async function getVaultOwner(vaultId) { return (await getVaultMetadata(vaultId)).owner; }
 
 export async function getOwnerVaultIds(ownerAddress) {
   const dmh = getDmhReadContract();
@@ -124,18 +125,13 @@ export async function previewFee(vaultId) {
   return dmh.previewFee(vaultId);
 }
 
-export async function getFailedAttempts(vaultId) {
-  const dmh = getDmhReadContract();
-  return dmh.getFailedAttempts(vaultId);
-}
+export async function getFailedAttempts(_vaultId) { return 0n; }
 
 /**
- * Full claim flow step: approve the fee token for the current previewed
- * fee amount (only if allowance is insufficient), then call attemptUnlock.
- * Returns the transaction receipt plus decoded UnlockAttempted/TokenTransfer*
- * events so the result screen can show an itemized outcome.
+ * Approve the fee token when needed, then submit a signed v2 claim. The
+ * phrase is intentionally not an argument to this function.
  */
-export async function attemptUnlock(vaultId, secretPlaintext, claimantAddress) {
+export async function submitClaim(claim, signature) {
   const net = requireDeployedAddress();
   if (!net.usdtAddress) {
     throw new Error(
@@ -144,24 +140,38 @@ export async function attemptUnlock(vaultId, secretPlaintext, claimantAddress) {
   }
 
   const dmh = getDmhWriteContract();
-  const fee = await dmh.previewFee(vaultId);
+  const signer = getCachedSigner();
+  const signerAddress = ethers.getAddress(await signer.getAddress());
+  if (signerAddress !== ethers.getAddress(claim.feePayer)) {
+    throw new Error('The connected wallet changed after the claim was signed. Reconnect and sign again.');
+  }
+  const walletNetwork = await signer.provider.getNetwork();
+  if (walletNetwork.chainId !== BigInt(net.chainId)) {
+    throw new Error(`The connected wallet is not on ${net.chainName}.`);
+  }
+  const fee = BigInt(claim.maxFee);
 
-  const usdt = getErc20WriteContract(net.usdtAddress);
-  const currentAllowance = await usdt.allowance(claimantAddress, net.dmhContractAddress);
+  const feeToken = await dmh.feeToken();
+  const usdt = getErc20WriteContract(feeToken);
+  const currentAllowance = await usdt.allowance(claim.feePayer, net.dmhContractAddress);
   if (currentAllowance < fee) {
     const approveTx = await usdt.approve(net.dmhContractAddress, fee);
     await approveTx.wait();
   }
 
-  const tx = await dmh.attemptUnlock(vaultId, secretPlaintext);
+  const tx = await dmh.claim(claim, signature);
   const receipt = await tx.wait();
 
   const iface = new ethers.Interface(DMH_ABI);
   const succeeded = [];
   const failed = [];
   let matched = false;
+  let recipient = claim.recipient;
+  let feePayer = claim.feePayer;
+  let feePaid = fee;
 
   for (const log of receipt.logs) {
+    if (log.address.toLowerCase() !== net.dmhContractAddress.toLowerCase()) continue;
     let parsed;
     try {
       parsed = iface.parseLog(log);
@@ -170,16 +180,23 @@ export async function attemptUnlock(vaultId, secretPlaintext, claimantAddress) {
     }
     if (!parsed) continue;
 
-    if (parsed.name === 'UnlockAttempted') {
-      matched = parsed.args.success;
-    } else if (parsed.name === 'TokenTransferSucceeded') {
+    if (parsed.name === 'VaultClaimed') {
+      matched = true;
+      recipient = parsed.args.recipient;
+      feePayer = parsed.args.feePayer;
+    } else if (parsed.name === 'FeeCollected') {
+      feePaid = parsed.args.amount;
+    }
+    else if (parsed.name === 'TokenTransferSucceeded') {
       succeeded.push({ token: parsed.args.token, amountOrId: parsed.args.amountOrId });
     } else if (parsed.name === 'TokenTransferFailed') {
       failed.push({ token: parsed.args.token, reason: parsed.args.reason });
     }
   }
 
-  return { receipt, matched, succeeded, failed, feePaid: fee };
+  if (!matched) throw new Error('The claim receipt did not contain the expected vault confirmation event.');
+
+  return { receipt, matched, recipient, feePayer, succeeded, failed, feePaid };
 }
 
 /**

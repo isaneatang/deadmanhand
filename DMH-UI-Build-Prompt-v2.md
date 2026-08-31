@@ -8,6 +8,15 @@ logic, partial-claim handling) still stands. This addendum only changes: visual
 theme, component architecture, network config, asset display, mobile-wallet
 behavior, and security constraints.
 
+> **Historical prompt note: implemented v2 supersedes inherited contract text.**
+> The current contract does not use a plaintext hash, `attemptUnlock`, failed
+> attempts, cooldowns, lockouts, or fee escalation. Replace those inherited
+> references with the v2 KDF v1 and EIP-712 Claim contract documented in the
+> repository README. The old testnet deployment address is disabled; deployment
+> migration requires a new v2 address and fresh approvals. The UI requirements
+> below remain historical guidance unless consistent with the implemented
+> frontend.
+
 **Instruction to the build AI:** Do not skip sections. Do not substitute your
 own visual style for the one described below. Do not use native HTML
 `<select>` dropdowns anywhere in this app. Do not fetch or import any

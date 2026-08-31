@@ -1,0 +1,222 @@
+SECURITY AUDIT & FIX PLAN — Dead Man's Hand (DMH)
+==================================================
+
+IMPLEMENTATION NOTE (v2)
+========================
+This document captured the original audit, but its proposed protocol was
+corrected during implementation. The v2 source now uses:
+
+  - PBKDF2-HMAC-SHA-256 with 600,000 iterations and a random per-vault salt.
+  - A public phrase-derived authorization signer; offline guessing is still
+    possible for weak phrases and is NOT eliminated by storing an address.
+  - EIP-712 claims binding vaultId, recipient, fee payer, nonce, deadline,
+    maximum fee, chain ID, and verifying contract.
+  - One-time vault consumption before external calls, with nonce protection.
+  - SafeERC20 fee handling and skip-and-continue asset transfers.
+  - ERC-721 index 0 re-querying. A failed NFT transfer stops that collection;
+    it is not changed to a naive `continue`, which would retry the same NFT.
+
+The old testnet v1 deployment cannot be upgraded and is disabled in the v2
+frontend configuration. A new deployment and fresh owner approvals are
+required. See README.md for the implemented protocol and verification status.
+
+CURRENT VULNERABILITIES (ranked)
+
+🔴 HIGH-1: Plaintext secret in mempool — front-running
+─────────────────────────────────────────────────────
+  Problem:
+    attemptUnlock(bytes32 vaultId, string secretPlaintext) sends the plaintext
+    secret as calldata. Anyone monitoring the mempool extracts the secret and
+    front-runs with higher gas, paying only the fee (~1–16 USDT) to drain
+    the entire vault.
+
+  Solution — Replace secretHash with derived claimant address:
+    Instead of:
+      Vault.secretHash = keccak256(secret, owner, vaultId)
+    Use:
+      Vault.claimantAddress = address derived from phrase
+
+    Flow:
+      1. Owner picks a phrase (e.g. 8 words, any language).
+      2. Client derives a private key: pk = keccak256(phrase)
+         (or a more robust KDF like PBKDF2/Scrypt).
+      3. Client computes: claimantAddress = address(pk)
+      4. createVault stores claimantAddress.
+      5. Claimant enters the same phrase, client derives pk, signs an
+         EIP-712 typed message (e.g. "claim vault {vaultId}").
+      6. attemptUnlock takes the signature (NOT the phrase), verifies via
+         ecrecover(sig) == vault.claimantAddress.
+      7. The phrase is never calldata — never visible in mempool. Only a
+         signature, which is useless to front-runners.
+
+  Bonus: eliminates offline brute-force. Currently secretHash is public
+  on-chain; anyone can guess phrases against it locally at zero cost.
+  With claimantAddress, an attacker cannot verify a guess without doing
+  an on-chain lookup against every vault — impractical.
+
+🔴 HIGH-2: Fee revert leaks secret without payoff
+───────────────────────────────────────────────────
+  Problem:
+    DeadMansHand.sol:300 — fee transfer is NOT in try-catch. If
+    feeToken.transferFrom reverts (many USDT implementations do this),
+    the entire tx reverts, BUT the plaintext secret is already visible
+    in the mempool/calldata. The attacker now knows the secret and can
+    call attemptUnlock themselves, paying the fee, to drain the vault.
+
+  This vulnerability is ELIMINATED by solution HIGH-1, because the
+  secret is never in calldata. Signature verification happens before
+  or after fee collection safely — no secret is exposed.
+
+  If HIGH-1 were NOT implemented, the fix would be to wrap fee
+  transfer in try-catch or check the secret BEFORE collecting fee.
+
+🟡 MEDIUM-3: _sweepERC721 abandons entire collection on one failure
+─────────────────────────────────────────────────────────────────────
+  Problem:
+    DeadMansHand.sol:411-413 — when safeTransferFrom reverts for one
+    NFT, the loop `break`s, leaving the rest of the collection unswept.
+
+  Fix:
+    Remove the `break` on line 413, replace with `continue`. Each NFT
+    transfer is independent — a single stale approval should not block
+    the rest of the collection.
+
+🟡 MEDIUM-4: Vault remains active after successful claim (re-drainable)
+─────────────────────────────────────────────────────────────────────────
+  Problem:
+    After a successful claim (sol:307-311), vault stays active=true and
+    owner unchanged. Owner can re-approve tokens and get drained again
+    after another inactivity period.
+
+  Fix (option A — deactivate on claim):
+    After _sweepTokens, set vault.active = false. One-time use vault.
+
+  Fix (option B — leave as-is, document):
+    Some users may want their vault reusable (e.g. inheritor re-charges
+    it). Document that the vault does not self-destruct. Acceptable if
+    intentional.
+
+🟢 LOW-5: Bitwise shift for fee doubling (sol:264)
+─────────────────────────────────────────────────────
+  baseFee << exponent is unconventionally fragile. Replace with
+  baseFee * (2 ** exponent) for clarity. No security impact.
+
+🟢 LOW-6: No address(0) check for feeToken on claim path
+──────────────────────────────────────────────────────────
+  Constructor checks feeToken != 0, so this is fine. Low severity.
+
+─────────────────────────────────────────────────────────
+
+REMAINING VULNERABILITIES AFTER FIXES (HIGH-1 + MEDIUM-3 + MEDIUM-4)
+
+After implementing all proposed fixes:
+
+✅ HIGH-1 solved (no plaintext in calldata, signature-based claim)
+✅ HIGH-2 solved (eliminated by HIGH-1 — no secret to leak)
+✅ MEDIUM-3 solved (continue instead of break)
+✅ MEDIUM-4 solved (deactivate on claim, or documented)
+✅ LOW-5 solved (use multiplication)
+✅ LOW-6 already fine
+
+Are there ANY remaining vulnerabilities even after these fixes?
+
+1. 🔴 Phrase brute-force via PK derivation weakness
+   ──────────────────────────────────────────────────
+   If the phrase-derived-key uses raw keccak256(phrase) as the private
+   key, an attacker who knows the claimantAddress can brute-force
+   phrases offline by doing:
+     for each guess: pk = keccak256(guess); address(pk) == target?
+   This is fast (pure keccak, no KDF slowdown). The same offline
+   brute-force that affected secretHash now shifts to the derived key.
+
+   Fix: Use a SLOW KDF (PBKDF2-SHA256 with 100k+ iterations, or
+   Scrypt/Argon2) to derive the private key from the phrase. This
+   makes offline brute-force infeasible. The derivation happens
+   client-side in JS — still fast enough for a single use (~100ms),
+   but a million guesses takes real time.
+
+   ⚠ Even with KDF, if the phrase is weak ("password123"), the
+     attacker derives pk, matches address, and wins. Entropy checks
+     on the client side (already in hashing.js:checkSecretEntropy)
+     remain essential.
+
+2. 🟡 Claimant must derive key in-browser — cannot use own wallet
+   ────────────────────────────────────────────────────────────────
+   The claimant cannot use their existing wallet (MetaMask, etc.) to
+   sign the EIP-712 message because the private key is derived from
+   the phrase, not from their wallet seed. The UI must handle signing
+   via ethers.Wallet(privateKey) directly. This is a UX trade-off:
+     - Pro: anyone with the phrase can claim from any device
+     - Con: no hardware wallet support; key lives in JS memory
+
+   Mitigation: wipe the derived private key from memory immediately
+   after signing (same pattern as the current secretValue cleanup
+   in Step2Secret.js and Step3SecretEntry.js).
+
+3. 🟡 Fee front-running (griefing, not theft)
+   ────────────────────────────────────────────
+   Without HIGH-1 (plaintext), the fee is still taken. An attacker
+   who knows the claimantAddress can front-run the attemptUnlock tx
+   with a valid signature they generate themselves — wait, no: the
+   signature must come from the derived private key, which only
+   someone with the phrase can produce. So this is NOT possible.
+
+   However, an attacker can still grief by submitting a mismatched
+   secret (current design) or just watching the mempool for anyone
+   else's attemptUnlock — but with plaintext removed, there's nothing
+   to front-run. The signature binds the claimant to the vaultId,
+   so only the phrase-holder can produce a valid signature.
+
+4. 🟡 Vault creator can DOS by pre-claiming (with signature)
+   ────────────────────────────────────────────────────────────
+   With the phrase-derived-key design, the owner knows the phrase
+   (they set it). The owner could front-run their own inheritor's
+   claim by signing a claim tx themselves first. This is intentional:
+   the owner always retains access via the phrase. Document this
+   so inheritors know: "the owner can claim before you, even after
+   inactivity expiry."
+
+5. 🟢 USDT.back() or non-standard token quirks
+   ───────────────────────────────────────────────
+   Some ERC20s (USDT, USDC, etc.) return void instead of bool on
+   transferFrom, or require 0-to-N allowance reset. The current
+   code uses try/except for ERC20/ERC721 transfers but not for
+   feeToken transfer (line 300). With HIGH-1, this is already
+   removed from the critical path (no secret leak), but it's still
+   a UX problem: failed fee = reverted claim.
+
+   Fix for fee token: wrap in try-catch, and allow ERC20 tokens
+   that return void by using low-level call.
+
+─────────────────────────────────────────────────────────
+
+CONCLUSION
+==========
+After implementing the phrase→private-key→address design (HIGH-1 fix):
+
+Theoric attacks remaining:
+  - Offline brute-force of weak phrases (mitigated by KDF + entropy check)
+  - Owner pre-claiming (by design, not a bug)
+  - Fee payment UX issues with quirky tokens (non-security)
+
+No practical on-chain attack path exists for stealing vault assets
+without knowing the phrase. The mempool front-running vector is
+eliminated because the secret never touches the network.
+
+Implementation order:
+  1. Replace secretHash → claimantAddress in DeadMansHand.sol
+  2. Add EIP-712 signature verification in attemptUnlock
+  3. Update client hashing.js with KDF derivation + EIP-712 signing
+  4. Fix _sweepERC721 break → continue (MEDIUM-3)
+  5. Deactivate vault on claim or document reusability (MEDIUM-4)
+  6. Fix fee token transfer robustness (LOW but UX-critical)
+
+ADDITIONAL SUGGESTION: Maximum vault age
+─────────────────────────────────────────
+Consider adding a maximum vault age (e.g. 10 years from creation). After
+this, the vault self-expires and can no longer be claimed. This prevents
+vaults from persisting forever if the owner loses the phrase permanently.
+Without this, funds are locked indefinitely — no one can ever claim them,
+but the vault also can't be removed. A self-destruct or expiry ensures
+dead vaults don't accumulate. This is a UX/trust improvement, not a
+security fix per se.

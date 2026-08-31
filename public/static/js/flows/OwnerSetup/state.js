@@ -4,7 +4,12 @@ export function createSetupState() {
     step: 1,
     address: null,
     vaultId: null,
-    secretHash: null, // computed client-side, plaintext never stored here
+    authorizationSigner: null,
+    kdfSalt: null,
+    kdfVersion: 1,
+    derivationChainId: null,
+    derivationContractAddress: null,
+    derivationOwnerAddress: null,
     inactivityPeriodSeconds: 180 * 24 * 60 * 60, // default 6 months
     selectedAssets: [], // [{address, symbol, decimals, type}]
     approvalResults: [], // [{asset, status: 'pending'|'success'|'error', error}]

@@ -1,11 +1,11 @@
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import { renderer } from './renderer'
 
 const app = new Hono()
 
 app.use(renderer)
 
-app.get('*', (c) => {
+app.get('*', (c: Context) => {
   return c.render(<div />)
 })
 

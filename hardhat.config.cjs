@@ -20,6 +20,10 @@ module.exports = {
   },
   networks: {
     hardhat: {},
+    localhost: {
+      url: process.env.LOCALHOST_URL || 'http://127.0.0.1:8545',
+      chainId: 31337,
+    },
     botTestnet: {
       url: 'https://rpc.bohr.life',
       chainId: 968,

@@ -8,6 +8,15 @@ Where a value is marked `UNVERIFIED`, use a clearly labeled placeholder and
 flag it in the README — do not fabricate contract addresses, RPC endpoints,
 or API paths.
 
+> **Historical document / superseded contract guidance.** This prompt predates
+> the implemented v2 contract. Use the repository README and
+> `contracts/DeadMansHand.sol` as the current contract of record. The plaintext
+> `secretHash` flow, `attemptUnlock` API, failed-attempt counter,
+> cooldown/lockout, fee escalation, and related security text below are
+> superseded by v2 and must not be implemented or described as current
+> behavior. V2 uses KDF v1 plus EIP-712 `Claim` authorization; see README for
+> the exact data model and fields.
+
 ---
 
 ## 1. Project Summary
