@@ -77,7 +77,7 @@ export async function deriveAuthorizationSigner(phrase, context) {
 
 export async function signClaimWithKey(key, claim, domain) {
   try {
-    const signature = await new ethers.Wallet(key.privateKey).signTypedData(domain, {
+    const signature = await new ethers.Wallet(ethers.hexlify(key.privateKey)).signTypedData(domain, {
       Claim: [
         { name: 'vaultId', type: 'bytes32' }, { name: 'recipient', type: 'address' },
         { name: 'feePayer', type: 'address' }, { name: 'nonce', type: 'uint256' },

@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
 
-const { deriveAuthorizationSigner } = await import('../public/static/js/lib/hashing.js');
+const { deriveAuthorizationSigner, signClaimWithKey } = await import('../public/static/js/lib/hashing.js');
 
 const CONTEXT = {
   chainId: 31337,
@@ -46,4 +46,26 @@ test('KDF v1 separates every public context field', { timeout: 180000 }, async (
 test('KDF v1 rejects malformed Unicode and oversized phrases', async () => {
   await assert.rejects(() => deriveAuthorizationSigner('\ud800', CONTEXT), /unpaired surrogate/);
   await assert.rejects(() => deriveAuthorizationSigner('a'.repeat(1025), CONTEXT), /at most 1024/);
+});
+
+test('derived authorization key signs a claim', { timeout: 120000 }, async () => {
+  const key = await deriveAuthorizationSigner('claim signing recovery phrase 2026!', CONTEXT);
+  const claim = {
+    vaultId: CONTEXT.vaultId,
+    recipient: '0x5555555555555555555555555555555555555555',
+    feePayer: '0x6666666666666666666666666666666666666666',
+    nonce: 0n,
+    deadline: 2000000000n,
+    maxFee: 1000000n,
+  };
+  const signed = await signClaimWithKey(key, claim, {
+    name: 'DeadMansHand',
+    version: '2',
+    chainId: CONTEXT.chainId,
+    verifyingContract: CONTEXT.contractAddress,
+  });
+
+  assert.equal(signed.signer, key.address);
+  assert.match(signed.signature, /^0x[0-9a-f]{130}$/i);
+  assert.ok(key.privateKey.every((byte) => byte === 0));
 });
