@@ -1,7 +1,8 @@
 // lib/ethers.js
 //
-// Single pinned import point for ethers.js. The package is bundled locally so
-// phrase derivation and signing never depend on third-party runtime scripts.
+// Single pinned import point for ethers.js. The browser import map in the
+// server-rendered shell resolves this package name to the pinned browser ESM
+// build, while Node tests resolve it from the local dependency.
 //
 // Every other module imports ethers from HERE (never a second, separately
 // pinned copy elsewhere) so there is exactly one version loaded, in one

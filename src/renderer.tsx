@@ -10,6 +10,7 @@ export const renderer = jsxRenderer(({ children }) => {
         <meta name="description" content="Non-custodial inheritance and emergency access for BOT Chain assets." />
         <title>Dead Man's Hand — BOT Chain</title>
         <link href="/static/css/theme.css" rel="stylesheet" />
+        <script type="importmap">{JSON.stringify({ imports: { ethers: 'https://cdn.jsdelivr.net/npm/ethers@6.17.0/+esm' } })}</script>
       </head>
       <body>
         <div id="app-root"></div>
