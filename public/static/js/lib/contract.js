@@ -153,10 +153,24 @@ export async function submitClaim(claim, signature) {
 
   const feeToken = await dmh.feeToken();
   const usdt = getErc20WriteContract(feeToken);
+  const balance = await usdt.balanceOf(claim.feePayer);
+  if (balance < fee) {
+    throw new Error(
+      `The fee-paying wallet needs ${ethers.formatUnits(fee, net.usdtDecimals || 6)} USDT but only has ${ethers.formatUnits(balance, net.usdtDecimals || 6)} USDT.`
+    );
+  }
   const currentAllowance = await usdt.allowance(claim.feePayer, net.dmhContractAddress);
   if (currentAllowance < fee) {
     const approveTx = await usdt.approve(net.dmhContractAddress, fee);
     await approveTx.wait();
+  }
+
+  // Run the exact signed claim first so stale vault state, signatures, fees,
+  // and token-transfer failures are reported before asking for another tx.
+  try {
+    await dmh.claim.staticCall(claim, signature);
+  } catch (error) {
+    throw new Error(describeClaimError(error));
   }
 
   const tx = await dmh.claim(claim, signature);
@@ -197,6 +211,49 @@ export async function submitClaim(claim, signature) {
   if (!matched) throw new Error('The claim receipt did not contain the expected vault confirmation event.');
 
   return { receipt, matched, recipient, feePayer, succeeded, failed, feePaid };
+}
+
+function describeClaimError(error) {
+  const data = extractRevertData(error);
+  if (data) {
+    try {
+      const parsed = new ethers.Interface(DMH_ABI).parseError(data);
+      if (parsed) {
+        if (parsed.name === 'NotExpiredYet') return `This vault is not claimable for another ${parsed.args.timeRemaining} seconds.`;
+        const messages = {
+          VaultNotFound: 'The vault no longer exists at the configured contract.',
+          VaultInactive: 'This vault is already claimed or was deactivated.',
+          InvalidFeePayer: 'The connected wallet is not the fee payer signed into this claim.',
+          InvalidRecipient: 'The claim recipient is invalid.',
+          InvalidNonce: 'The vault changed after lookup. Return to lookup and load it again.',
+          AuthorizationExpired: 'The signed claim expired. Submit it again to create a fresh authorization.',
+          FeeExceedsMaximum: 'The contract fee changed after this claim was prepared. Reload the claim.',
+          InvalidSignature: 'The generated authorization signature was rejected by the contract.',
+          FeeTransferFailed: 'The 1 USDT fee transfer failed. Check the fee payer balance and approval, then retry.',
+        };
+        if (messages[parsed.name]) return messages[parsed.name];
+        return `Claim rejected: ${parsed.name}.`;
+      }
+    } catch (_error) {
+      // Fall through to the wallet/provider message when the selector is not
+      // emitted by the DMH contract.
+    }
+  }
+  return error.shortMessage || error.reason || error.message || 'The claim simulation was rejected.';
+}
+
+function extractRevertData(error) {
+  const candidates = [
+    error?.data,
+    error?.info?.error?.data,
+    error?.error?.data,
+    error?.cause?.data,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && /^0x[0-9a-f]+$/i.test(candidate)) return candidate;
+    if (typeof candidate?.data === 'string' && /^0x[0-9a-f]+$/i.test(candidate.data)) return candidate.data;
+  }
+  return null;
 }
 
 /**
